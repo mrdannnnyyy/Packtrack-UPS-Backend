@@ -1,6 +1,8 @@
 const express = require('express');
 const axios = require('axios');
 const cors = require('cors');
+const { initializeApp } = require('firebase/app');
+const { getFirestore, collection, getDocs } = require('firebase/firestore');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -8,182 +10,212 @@ const PORT = process.env.PORT || 3000;
 app.use(cors());
 app.use(express.json());
 
-// --- CREDENTIALS ---
-// UPS
+// --- CONFIGURATION ---
+
+// 1. FIREBASE CONFIG (Copied from your frontend)
+const firebaseConfig = {
+  apiKey: "AIzaSyAKbvODxE_ULiag9XBXHnAJO4b-tGWSq0w",
+  authDomain: "time-tracking-67712.firebaseapp.com",
+  projectId: "time-tracking-67712",
+  storageBucket: "time-tracking-67712.firebasestorage.app",
+  messagingSenderId: "829274875816",
+  appId: "1:829274875816:web:ee9e8046d22a115e42df9d"
+};
+
+// Initialize Firebase Server-Side
+const firebaseApp = initializeApp(firebaseConfig);
+const db = getFirestore(firebaseApp);
+
+// 2. UPS CREDENTIALS
 const UPS_CLIENT_ID = process.env.UPS_CLIENT_ID || '9qBB9J4GXk4ex6kqVIkrfqqgQCmj4UIYo5cxmz4UamZtxS1T';
 const UPS_CLIENT_SECRET = process.env.UPS_CLIENT_SECRET || 'JUhoZG0360GgSYdW8bAhLX4mzB2mYA1sIG2GIiyPnLeWdNoIecJ0LoN9wo9jOxGp';
 const UPS_OAUTH_URL = 'https://onlinetools.ups.com/security/v1/oauth/token';
 const UPS_TRACKING_BASE_URL = 'https://onlinetools.ups.com/api/track/v1/details/';
 
-// SHIPSTATION (REPLACE THESE WITH YOUR ACTUAL KEYS)
+// 3. SHIPSTATION CREDENTIALS (REPLACE WITH YOURS)
 const SS_API_KEY = process.env.SS_API_KEY || '310e27d626ab425fa808c8696486cdcf';
 const SS_API_SECRET = process.env.SS_API_SECRET || '7e5657c37bcd42e087062343ea1edc0f';
 
 // --- IN-MEMORY CACHE ---
-// key: trackingNumber, value: { data: object, timestamp: number }
 const trackingCache = new Map();
 const CACHE_DURATION_MS = 30 * 60 * 1000; // 30 Minutes
 
 // --- HELPERS ---
 
-// 1. Get UPS Token
 async function getUPSToken() {
   const credentials = Buffer.from(`${UPS_CLIENT_ID}:${UPS_CLIENT_SECRET}`).toString('base64');
   try {
-    const response = await axios.post(UPS_OAUTH_URL, 
-      'grant_type=client_credentials', 
-      {
-        headers: {
-          'Content-Type': 'application/x-www-form-urlencoded',
-          'Authorization': `Basic ${credentials}`
-        }
+    const response = await axios.post(UPS_OAUTH_URL, 'grant_type=client_credentials', {
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'Authorization': `Basic ${credentials}`
       }
-    );
+    });
     return response.data.access_token;
   } catch (error) {
-    console.error("UPS Auth Error:", error.response?.data || error.message);
-    throw new Error("Failed to authenticate with UPS");
+    console.error("UPS Auth Error:", error.message);
+    throw new Error("UPS Auth Failed");
   }
 }
 
-// 2. Track Single Package (Internal Function)
-async function trackPackageInternal(trackingNumber) {
-  // A. Check Cache
+async function trackUPS(trackingNumber) {
+  // 1. Check Cache
   if (trackingCache.has(trackingNumber)) {
     const cached = trackingCache.get(trackingNumber);
-    const age = Date.now() - cached.timestamp;
-    if (age < CACHE_DURATION_MS) {
-      // console.log(`Returning cached data for ${trackingNumber}`);
+    if (Date.now() - cached.timestamp < CACHE_DURATION_MS) {
       return cached.data;
     }
   }
 
-  // B. Call API
+  // 2. Fetch Fresh
   try {
     const token = await getUPSToken();
-    const queryParams = "locale=en_US&returnSignature=false&returnMilestones=false&returnPOD=false";
-    const url = `${UPS_TRACKING_BASE_URL}${encodeURIComponent(trackingNumber)}?${queryParams}`;
+    const query = "locale=en_US&returnSignature=false&returnMilestones=false&returnPOD=false";
+    const url = `${UPS_TRACKING_BASE_URL}${encodeURIComponent(trackingNumber)}?${query}`;
 
-    const upsResponse = await axios.get(url, {
+    const res = await axios.get(url, {
       headers: {
         'transId': `trans-${Date.now()}`,
         'transactionSrc': 'PackTrackPro',
-        'Authorization': `Bearer ${token}`,
-        'Content-Type': 'application/json'
+        'Authorization': `Bearer ${token}`
       },
-      timeout: 10000 // 10s timeout
+      timeout: 8000
     });
 
-    const data = upsResponse.data;
-    const shipment = data.trackResponse?.shipment?.[0];
-    const packageData = shipment?.package?.[0];
-    const activity = packageData?.activity?.[0];
-
-    const formatDate = (raw) => {
-      if (!raw || raw.length !== 8) return "--";
-      return `${raw.substring(4, 6)}/${raw.substring(6, 8)}/${raw.substring(0, 4)}`;
-    };
-
-    const status = activity?.status?.description || "Unknown Status";
+    const pkg = res.data.trackResponse?.shipment?.[0]?.package?.[0];
+    const activity = pkg?.activity?.[0];
+    
+    const formatDate = (raw) => raw && raw.length === 8 ? `${raw.substring(4,6)}/${raw.substring(6,8)}/${raw.substring(0,4)}` : "--";
+    
+    const status = activity?.status?.description || "Unknown";
     const result = {
       status,
-      carrier: "UPS",
-      date: formatDate(activity?.date),
       location: [activity?.location?.address?.city, activity?.location?.address?.stateProvince].filter(Boolean).join(", "),
+      expectedDelivery: formatDate(pkg?.deliveryDate?.[0]?.date),
       delivered: status.toLowerCase().includes("delivered"),
-      trackingUrl: `https://www.ups.com/track?loc=null&tracknum=${trackingNumber}&requester=WT/trackdetails`,
-      expectedDelivery: formatDate(packageData?.deliveryDate?.[0]?.date),
-      lastUpdated: Date.now()
+      lastUpdated: Date.now(),
+      trackingUrl: `https://www.ups.com/track?loc=null&tracknum=${trackingNumber}&requester=WT/trackdetails`
     };
 
-    // C. Update Cache
     trackingCache.set(trackingNumber, { data: result, timestamp: Date.now() });
-    
     return result;
 
-  } catch (error) {
-    console.error(`Error tracking ${trackingNumber}:`, error.message);
-    // Return error object but don't crash
+  } catch (e) {
+    // Return safe fallback
     return {
       status: "Pending Update",
-      carrier: "UPS",
-      error: true,
+      location: "",
+      expectedDelivery: "--",
       delivered: false,
-      lastUpdated: Date.now()
+      lastUpdated: Date.now(),
+      trackingUrl: "",
+      error: true
     };
   }
 }
 
-// --- ENDPOINTS ---
+async function getAllShipStationOrders() {
+  const auth = Buffer.from(`${SS_API_KEY}:${SS_API_SECRET}`).toString('base64');
+  let allOrders = [];
+  let page = 1;
+  let totalPages = 1;
+  const pageSize = 500; // Max allowed by SS
 
-// Existing Endpoint (kept for compatibility)
-app.post('/track', async (req, res) => {
-  const { trackingNumber } = req.body;
-  if (!trackingNumber) return res.status(400).json({ error: "No ID" });
-  const result = await trackPackageInternal(trackingNumber);
-  res.json(result);
-});
+  console.log("Fetching ShipStation Orders...");
 
-// NEW ENDPOINT: Get Orders + Tracking
+  try {
+    do {
+      const res = await axios.get(`https://ssapi.shipstation.com/orders?orderStatus=shipped&pageSize=${pageSize}&page=${page}`, {
+        headers: { 'Authorization': `Basic ${auth}` }
+      });
+      
+      const orders = res.data.orders || [];
+      allOrders = allOrders.concat(orders);
+      totalPages = res.data.pages || 1;
+      
+      console.log(`Fetched Page ${page}/${totalPages} (${orders.length} orders)`);
+      page++;
+    } while (page <= totalPages);
+    
+    return allOrders;
+  } catch (e) {
+    console.error("ShipStation Fetch Error:", e.message);
+    return []; // Return empty on error to not crash entire flow
+  }
+}
+
+// --- MAIN ENDPOINT ---
+
 app.get('/orders/with-tracking', async (req, res) => {
   try {
-    // 1. Fetch Shipped Orders from ShipStation
-    const auth = Buffer.from(`${SS_API_KEY}:${SS_API_SECRET}`).toString('base64');
+    // 1. Fetch Source of Truth: Firestore Logs
+    const logsSnap = await getDocs(collection(db, 'packtrack_logs'));
+    const logs = logsSnap.docs.map(d => d.data());
     
-    // Fetch last 100 shipped orders
-    const ssResponse = await axios.get('https://ssapi.shipstation.com/orders?orderStatus=shipped&pageSize=50&page=1', {
-      headers: { 'Authorization': `Basic ${auth}` }
+    // Filter to only logs that have a tracking ID
+    const validLogs = logs.filter(l => l.trackingId && l.trackingId.length > 5);
+    console.log(`Found ${validLogs.length} Firestore logs.`);
+
+    // 2. Fetch All ShipStation Orders
+    const ssOrders = await getAllShipStationOrders();
+    
+    // Create Map for O(1) Lookup
+    const ssMap = new Map();
+    ssOrders.forEach(o => {
+      // Check shipment tracking
+      const tracking = o.shipments?.[0]?.trackingNumber || o.trackingNumber;
+      if (tracking) ssMap.set(tracking, o);
     });
 
-    const orders = ssResponse.data.orders || [];
+    // 3. Merge & Enrich
+    // We iterate through FIRESTORE logs as the primary list
+    const enrichedPromises = validLogs.map(async (log) => {
+      const trackingId = log.trackingId;
+      const order = ssMap.get(trackingId);
 
-    // 2. Enrich with Tracking Data (Parallel Requests)
-    const enrichedOrders = await Promise.all(orders.map(async (order) => {
-      // Find valid tracking number
-      const shipment = order.shipments ? order.shipments[0] : null;
-      const trackingNumber = order.userId || shipment?.trackingNumber || null; // Fallback logic
-      
-      let trackingData = {
-        status: "Not Shipped",
-        location: "",
-        expectedDelivery: "--",
-        lastChecked: Date.now(),
-        trackingUrl: "",
-        delivered: false
-      };
+      // A. Fetch UPS Data (Cached)
+      const upsData = await trackUPS(trackingId);
 
-      if (trackingNumber) {
-        // Only track if it looks like UPS (starts with 1Z) or just try all for now
-        // Simple filter: length > 5
-        if (trackingNumber.length > 5) {
-           trackingData = await trackPackageInternal(trackingNumber);
-        }
+      // B. Construct Final Object
+      if (order) {
+        return {
+          orderId: order.orderId,
+          orderNumber: order.orderNumber,
+          customerName: order.billTo?.name || "Unknown",
+          customerEmail: order.customerEmail || "",
+          items: order.items?.map(i => `${i.quantity}x ${i.name}`).join(', ') || "",
+          shipDate: order.shipDate ? order.shipDate.split('T')[0] : "--",
+          trackingNumber: trackingId,
+          carrierCode: order.carrierCode || "ups",
+          ...upsData // Spread UPS status/loc/etc
+        };
+      } else {
+        // Log exists in Firestore but not found in ShipStation
+        return {
+          orderId: 0,
+          orderNumber: "Manual Log",
+          customerName: "Unknown (Manual Scan)",
+          customerEmail: "",
+          items: "Manual Entry",
+          shipDate: log.dateStr || "--",
+          trackingNumber: trackingId,
+          carrierCode: "ups",
+          ...upsData
+        };
       }
+    });
 
-      return {
-        orderId: order.orderId,
-        orderNumber: order.orderNumber,
-        customerName: order.billTo.name,
-        customerEmail: order.customerEmail,
-        items: order.items.map(i => `${i.quantity}x ${i.name}`).join(', '),
-        shipDate: order.shipDate ? order.shipDate.split('T')[0] : '--',
-        trackingNumber: trackingNumber || 'No Tracking',
-        carrierCode: order.carrierCode || 'Unknown',
-        ...trackingData
-      };
-    }));
+    const results = await Promise.all(enrichedPromises);
+    
+    // Sort by Date (Newest First)
+    results.sort((a, b) => b.lastUpdated - a.lastUpdated);
 
-    res.json(enrichedOrders);
+    res.json(results);
 
   } catch (error) {
-    console.error("ShipStation Error:", error.response?.data || error.message);
-    res.status(500).json({ 
-      error: "Failed to fetch orders", 
-      details: error.message 
-    });
+    console.error("Endpoint Error:", error);
+    res.status(500).json({ error: "Internal Server Error", details: error.message });
   }
 });
 
-app.listen(PORT, () => {
-  console.log(`Backend running on ${PORT}`);
-});
+app.listen(PORT, () => console.log(`Backend running on ${PORT}`));
