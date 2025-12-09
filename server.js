@@ -39,12 +39,14 @@ let UPS_TOKEN = null;
 let UPS_TOKEN_EXPIRES = 0;
 
 /* ---------------------------------------------
-   UPS TOKEN (CACHED FOR 50 MINUTES)
+   UPS TOKEN (CACHED)
 ----------------------------------------------*/
 async function getUPSToken() {
+  // Use cached token if still valid
   if (UPS_TOKEN && Date.now() < UPS_TOKEN_EXPIRES) {
     return UPS_TOKEN;
   }
+
   try {
     const credentials = Buffer.from(
       `${UPS_CLIENT_ID}:${UPS_CLIENT_SECRET}`
@@ -58,15 +60,28 @@ async function getUPSToken() {
           "Content-Type": "application/x-www-form-urlencoded",
           Authorization: `Basic ${credentials}`,
         },
+        timeout: 8000,
       }
     );
 
     UPS_TOKEN = res.data.access_token;
-    UPS_TOKEN_EXPIRES = Date.now() + 50 * 60 * 1000; // Valid for 50 minutes
+    // Valid for ~50 minutes
+    UPS_TOKEN_EXPIRES = Date.now() + 50 * 60 * 1000;
 
     return UPS_TOKEN;
   } catch (err) {
-    console.error("UPS OAuth Error:", err.message);
+    const status = err.response?.status;
+    const data = err.response?.data;
+
+    console.error("UPS OAuth Error:", err.message, "status:", status);
+    if (data) {
+      console.error("UPS OAuth Response:", JSON.stringify(data));
+    }
+
+    // Back off for 5 minutes to avoid hammering UPS if creds are bad
+    UPS_TOKEN = null;
+    UPS_TOKEN_EXPIRES = Date.now() + 5 * 60 * 1000;
+
     return null;
   }
 }
@@ -89,7 +104,7 @@ async function trackUPS(trackingNumber) {
     if (Date.now() - cached.timestamp < CACHE_MS) return cached.data;
   }
 
-  let token = await getUPSToken();
+  const token = await getUPSToken();
   if (!token) {
     return {
       status: "UPS Auth Error",
@@ -119,7 +134,9 @@ async function trackUPS(trackingNumber) {
 
     const formatted = {
       status: act?.status?.description || "Unknown",
-      delivered: (act?.status?.description || "").toLowerCase().includes("delivered"),
+      delivered: (act?.status?.description || "")
+        .toLowerCase()
+        .includes("delivered"),
       location: [
         act?.location?.address?.city,
         act?.location?.address?.stateProvince,
@@ -138,6 +155,11 @@ async function trackUPS(trackingNumber) {
 
     return formatted;
   } catch (err) {
+    const status = err.response?.status;
+    if (status === 429) {
+      console.error("UPS Tracking 429 (rate limited) for", trackingNumber);
+    }
+
     return {
       status: "Pending Update",
       delivered: false,
@@ -164,9 +186,13 @@ async function fetchAllShipStation() {
 
   try {
     do {
+      // 🔧 FIXED: removed orderStatus=shipped so we get ALL orders
       const res = await axios.get(
-        `https://ssapi.shipstation.com/orders?page=${page}&pageSize=500&orderStatus=shipped`,
-        { headers: { Authorization: `Basic ${auth}` } }
+        `https://ssapi.shipstation.com/orders?page=${page}&pageSize=500`,
+        {
+          headers: { Authorization: `Basic ${auth}` },
+          timeout: 10000,
+        }
       );
 
       pages = res.data.pages || 1;
@@ -176,9 +202,17 @@ async function fetchAllShipStation() {
       page++;
     } while (page <= pages);
 
+    console.log("Total ShipStation orders fetched:", orders.length);
     return orders;
   } catch (err) {
     console.error("ShipStation Error:", err.message);
+    if (err.response) {
+      console.error(
+        "ShipStation Response:",
+        err.response.status,
+        JSON.stringify(err.response.data)
+      );
+    }
     return [];
   }
 }
@@ -193,7 +227,7 @@ app.get("/orders/with-tracking", async (req, res) => {
     const snap = await getDocs(collection(db, "packtrack_logs"));
     const logs = snap.docs.map((d) => d.data()).filter((l) => l.trackingId);
 
-    console.log("Logs:", logs.length);
+    console.log("Logs from Firestore:", logs.length);
 
     // 2. ShipStation Orders
     const ssOrders = await fetchAllShipStation();
@@ -204,8 +238,13 @@ app.get("/orders/with-tracking", async (req, res) => {
         o.shipments?.[0]?.trackingNumber ||
         o.trackingNumber ||
         o.tracking_number;
-      if (tn) ssMap.set(tn, o);
+
+      if (tn) {
+        ssMap.set(tn, o);
+      }
     });
+
+    console.log("ShipStation orders with tracking:", ssMap.size);
 
     // 3. Merge
     const enriched = await Promise.all(
@@ -213,32 +252,39 @@ app.get("/orders/with-tracking", async (req, res) => {
         const ss = ssMap.get(log.trackingId);
         const ups = await trackUPS(log.trackingId);
 
-        return {
+        const base = {
           trackingNumber: log.trackingId,
           logDate: log.dateStr,
           ...ups,
-          ...(ss
-            ? {
-                orderId: ss.orderId,
-                orderNumber: ss.orderNumber,
-                customerName: ss.billTo?.name || "Unknown",
-                items: ss.items
-                  ?.map((i) => `${i.quantity}x ${i.name}`)
-                  .join(", "),
-                shipDate: ss.shipDate,
-              }
-            : {
-                orderId: null,
-                orderNumber: "Not Found",
-                customerName: "Manual Scan",
-                items: "",
-                shipDate: log.dateStr,
-              }),
         };
+
+        if (ss) {
+          return {
+            ...base,
+            orderId: ss.orderId,
+            orderNumber: ss.orderNumber,
+            customerName: ss.billTo?.name || "Unknown",
+            items: ss.items
+              ?.map((i) => `${i.quantity}x ${i.name}`)
+              .join(", "),
+            shipDate: ss.shipDate,
+          };
+        } else {
+          // No ShipStation match → manual scan / non-SS label
+          return {
+            ...base,
+            orderId: null,
+            orderNumber: "Not Found",
+            customerName: "Manual Scan",
+            items: "",
+            shipDate: log.dateStr,
+          };
+        }
       })
     );
 
-    enriched.sort((a, b) => b.lastUpdated - a.lastUpdated);
+    // Sort by most recently updated UPS activity
+    enriched.sort((a, b) => (b.lastUpdated || 0) - (a.lastUpdated || 0));
 
     res.json(enriched);
   } catch (err) {
