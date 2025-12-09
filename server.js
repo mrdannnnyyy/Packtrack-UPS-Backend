@@ -1,167 +1,189 @@
-import express from "express";
-import axios from "axios";
-import dotenv from "dotenv";
-import cors from "cors";
-
-dotenv.config();
+const express = require('express');
+const axios = require('axios');
+const cors = require('cors');
 
 const app = express();
+const PORT = process.env.PORT || 3000;
+
 app.use(cors());
 app.use(express.json());
 
-// --------------------------------------------
-// UPS CONSTANTS
-// --------------------------------------------
-const UPS_AUTH_URL = "https://onlinetools.ups.com/security/v1/oauth/token";
-const UPS_TRACK_URL = "https://onlinetools.ups.com/api/track/v1/details/";
+// --- CREDENTIALS ---
+// UPS
+const UPS_CLIENT_ID = process.env.UPS_CLIENT_ID || '9qBB9J4GXk4ex6kqVIkrfqqgQCmj4UIYo5cxmz4UamZtxS1T';
+const UPS_CLIENT_SECRET = process.env.UPS_CLIENT_SECRET || 'JUhoZG0360GgSYdW8bAhLX4mzB2mYA1sIG2GIiyPnLeWdNoIecJ0LoN9wo9jOxGp';
+const UPS_OAUTH_URL = 'https://onlinetools.ups.com/security/v1/oauth/token';
+const UPS_TRACKING_BASE_URL = 'https://onlinetools.ups.com/api/track/v1/details/';
 
+// SHIPSTATION (REPLACE THESE WITH YOUR ACTUAL KEYS)
+const SS_API_KEY = process.env.SS_API_KEY || '310e27d626ab425fa808c8696486cdcf';
+const SS_API_SECRET = process.env.SS_API_SECRET || '7e5657c37bcd42e087062343ea1edc0f';
 
-// =====================================================
-// 🔐 1. GET UPS OAUTH TOKEN
-// =====================================================
+// --- IN-MEMORY CACHE ---
+// key: trackingNumber, value: { data: object, timestamp: number }
+const trackingCache = new Map();
+const CACHE_DURATION_MS = 30 * 60 * 1000; // 30 Minutes
+
+// --- HELPERS ---
+
+// 1. Get UPS Token
 async function getUPSToken() {
+  const credentials = Buffer.from(`${UPS_CLIENT_ID}:${UPS_CLIENT_SECRET}`).toString('base64');
   try {
-    const creds = Buffer.from(
-      `${process.env.UPS_CLIENT_ID}:${process.env.UPS_CLIENT_SECRET}`
-    ).toString("base64");
-
-    const res = await axios.post(
-      UPS_AUTH_URL,
-      "grant_type=client_credentials",
+    const response = await axios.post(UPS_OAUTH_URL, 
+      'grant_type=client_credentials', 
       {
         headers: {
-          Authorization: `Basic ${creds}`,
-          "Content-Type": "application/x-www-form-urlencoded",
-        },
+          'Content-Type': 'application/x-www-form-urlencoded',
+          'Authorization': `Basic ${credentials}`
+        }
       }
     );
-
-    return res.data.access_token;
-
-  } catch (err) {
-    console.error("UPS AUTH ERROR:", err.response?.data || err.toString());
-    throw new Error("Failed to authenticate with UPS.");
+    return response.data.access_token;
+  } catch (error) {
+    console.error("UPS Auth Error:", error.response?.data || error.message);
+    throw new Error("Failed to authenticate with UPS");
   }
 }
 
-
-
-// =====================================================
-// 📦 2. PARSE UPS RESPONSE INTO CLEAN FORMAT
-// =====================================================
-function parseUPSResponse(upsRaw, trackingNumber) {
-  try {
-    const shipment = upsRaw?.trackResponse?.shipment?.[0];
-    const pkg = shipment?.package?.[0];
-    const activity = pkg?.activity?.[0];
-
-    // STATUS
-    const status = activity?.status?.description || "Unknown";
-
-    // DATE
-    const dateRaw = activity?.date || null;
-    let date = "--";
-    if (dateRaw && dateRaw.length === 8) {
-      date = `${dateRaw.substring(4, 6)}/${dateRaw.substring(6, 8)}/${dateRaw.substring(0, 4)}`;
+// 2. Track Single Package (Internal Function)
+async function trackPackageInternal(trackingNumber) {
+  // A. Check Cache
+  if (trackingCache.has(trackingNumber)) {
+    const cached = trackingCache.get(trackingNumber);
+    const age = Date.now() - cached.timestamp;
+    if (age < CACHE_DURATION_MS) {
+      // console.log(`Returning cached data for ${trackingNumber}`);
+      return cached.data;
     }
-
-    // LOCATION
-    const addr = activity?.location?.address || {};
-    const location = `${addr.city || ""} ${addr.stateProvince || ""} ${addr.country || ""}`.trim();
-
-    // DELIVERED
-    const delivered = status.toLowerCase().includes("delivered");
-
-    // EXPECTED DELIVERY
-    const expected = pkg?.deliveryDate?.[0]?.date || null;
-    let expectedDelivery = "--";
-    if (expected && expected.length === 8) {
-      expectedDelivery = `${expected.substring(4, 6)}/${expected.substring(6, 8)}/${expected.substring(0, 4)}`;
-    }
-
-    return {
-      trackingNumber,
-      status,
-      date,
-      location,
-      delivered,
-      expectedDelivery,
-      trackingUrl: `https://www.ups.com/track?tracknum=${trackingNumber}`,
-      error: null,
-    };
-
-  } catch (err) {
-    console.error("PARSE ERROR:", err);
-    return {
-      trackingNumber,
-      status: "Unknown",
-      date: "--",
-      location: "",
-      delivered: false,
-      expectedDelivery: "--",
-      trackingUrl: `https://www.ups.com/track?tracknum=${trackingNumber}`,
-      error: "Parse error",
-    };
-  }
-}
-
-
-
-// =====================================================
-// 🛣️ 3. MAIN /track ENDPOINT
-// =====================================================
-app.post("/track", async (req, res) => {
-  const { trackingNumber } = req.body;
-
-  if (!trackingNumber) {
-    return res.status(400).json({
-      error: "Tracking number is required.",
-    });
   }
 
+  // B. Call API
   try {
-    // GET TOKEN
     const token = await getUPSToken();
+    const queryParams = "locale=en_US&returnSignature=false&returnMilestones=false&returnPOD=false";
+    const url = `${UPS_TRACKING_BASE_URL}${encodeURIComponent(trackingNumber)}?${queryParams}`;
 
-    // REQUEST UPS API
-    const upsRes = await axios.get(
-      `${UPS_TRACK_URL}${trackingNumber}?locale=en_US`,
-      {
-        headers: {
-          Authorization: `Bearer ${token}`,
-          transId: `tx-${Date.now()}`,
-          transactionSrc: "PackTrackPro",
-        },
-      }
-    );
+    const upsResponse = await axios.get(url, {
+      headers: {
+        'transId': `trans-${Date.now()}`,
+        'transactionSrc': 'PackTrackPro',
+        'Authorization': `Bearer ${token}`,
+        'Content-Type': 'application/json'
+      },
+      timeout: 10000 // 10s timeout
+    });
 
-    // FORMAT RESPONSE
-    const parsed = parseUPSResponse(upsRes.data, trackingNumber);
+    const data = upsResponse.data;
+    const shipment = data.trackResponse?.shipment?.[0];
+    const packageData = shipment?.package?.[0];
+    const activity = packageData?.activity?.[0];
 
-    return res.json(parsed);
+    const formatDate = (raw) => {
+      if (!raw || raw.length !== 8) return "--";
+      return `${raw.substring(4, 6)}/${raw.substring(6, 8)}/${raw.substring(0, 4)}`;
+    };
 
-  } catch (err) {
-    console.error("UPS TRACK ERROR:", err.response?.data || err.toString());
+    const status = activity?.status?.description || "Unknown Status";
+    const result = {
+      status,
+      carrier: "UPS",
+      date: formatDate(activity?.date),
+      location: [activity?.location?.address?.city, activity?.location?.address?.stateProvince].filter(Boolean).join(", "),
+      delivered: status.toLowerCase().includes("delivered"),
+      trackingUrl: `https://www.ups.com/track?loc=null&tracknum=${trackingNumber}&requester=WT/trackdetails`,
+      expectedDelivery: formatDate(packageData?.deliveryDate?.[0]?.date),
+      lastUpdated: Date.now()
+    };
 
-    return res.status(500).json({
-      trackingNumber,
-      status: "Unknown",
-      date: "--",
-      location: "",
+    // C. Update Cache
+    trackingCache.set(trackingNumber, { data: result, timestamp: Date.now() });
+    
+    return result;
+
+  } catch (error) {
+    console.error(`Error tracking ${trackingNumber}:`, error.message);
+    // Return error object but don't crash
+    return {
+      status: "Pending Update",
+      carrier: "UPS",
+      error: true,
       delivered: false,
-      expectedDelivery: "--",
-      trackingUrl: `https://www.ups.com/track?tracknum=${trackingNumber}`,
-      error: err.response?.data || err.toString(),
+      lastUpdated: Date.now()
+    };
+  }
+}
+
+// --- ENDPOINTS ---
+
+// Existing Endpoint (kept for compatibility)
+app.post('/track', async (req, res) => {
+  const { trackingNumber } = req.body;
+  if (!trackingNumber) return res.status(400).json({ error: "No ID" });
+  const result = await trackPackageInternal(trackingNumber);
+  res.json(result);
+});
+
+// NEW ENDPOINT: Get Orders + Tracking
+app.get('/orders/with-tracking', async (req, res) => {
+  try {
+    // 1. Fetch Shipped Orders from ShipStation
+    const auth = Buffer.from(`${SS_API_KEY}:${SS_API_SECRET}`).toString('base64');
+    
+    // Fetch last 100 shipped orders
+    const ssResponse = await axios.get('https://ssapi.shipstation.com/orders?orderStatus=shipped&pageSize=50&page=1', {
+      headers: { 'Authorization': `Basic ${auth}` }
+    });
+
+    const orders = ssResponse.data.orders || [];
+
+    // 2. Enrich with Tracking Data (Parallel Requests)
+    const enrichedOrders = await Promise.all(orders.map(async (order) => {
+      // Find valid tracking number
+      const shipment = order.shipments ? order.shipments[0] : null;
+      const trackingNumber = order.userId || shipment?.trackingNumber || null; // Fallback logic
+      
+      let trackingData = {
+        status: "Not Shipped",
+        location: "",
+        expectedDelivery: "--",
+        lastChecked: Date.now(),
+        trackingUrl: "",
+        delivered: false
+      };
+
+      if (trackingNumber) {
+        // Only track if it looks like UPS (starts with 1Z) or just try all for now
+        // Simple filter: length > 5
+        if (trackingNumber.length > 5) {
+           trackingData = await trackPackageInternal(trackingNumber);
+        }
+      }
+
+      return {
+        orderId: order.orderId,
+        orderNumber: order.orderNumber,
+        customerName: order.billTo.name,
+        customerEmail: order.customerEmail,
+        items: order.items.map(i => `${i.quantity}x ${i.name}`).join(', '),
+        shipDate: order.shipDate ? order.shipDate.split('T')[0] : '--',
+        trackingNumber: trackingNumber || 'No Tracking',
+        carrierCode: order.carrierCode || 'Unknown',
+        ...trackingData
+      };
+    }));
+
+    res.json(enrichedOrders);
+
+  } catch (error) {
+    console.error("ShipStation Error:", error.response?.data || error.message);
+    res.status(500).json({ 
+      error: "Failed to fetch orders", 
+      details: error.message 
     });
   }
 });
 
-
-
-// =====================================================
-// 🚀 4. START SERVER
-// =====================================================
-const PORT = process.env.PORT || 4000;
 app.listen(PORT, () => {
-  console.log(`UPS backend running on port ${PORT}`);
+  console.log(`Backend running on ${PORT}`);
 });
