@@ -27,15 +27,20 @@ const firebaseApp = initializeApp(firebaseConfig);
 const db = getFirestore(firebaseApp);
 
 // 2. UPS CREDENTIALS
-const UPS_CLIENT_ID = process.env.UPS_CLIENT_ID || '9qBB9J4GXk4ex6kqVIkrfqqgQCmj4UIYo5cxmz4UamZtxS1T';
-const UPS_CLIENT_SECRET = process.env.UPS_CLIENT_SECRET || 'JUhoZG0360GgSYdW8bAhLX4mzB2mYA1sIG2GIiyPnLeWdNoIecJ0LoN9wo9jOxGp';
+if (!process.env.UPS_CLIENT_ID || !process.env.UPS_CLIENT_SECRET) {
+  throw new Error("Missing UPS credentials: Set UPS_CLIENT_ID and UPS_CLIENT_SECRET in Render.");
+}
+const UPS_CLIENT_ID = process.env.UPS_CLIENT_ID;
+const UPS_CLIENT_SECRET = process.env.UPS_CLIENT_SECRET;
 const UPS_OAUTH_URL = 'https://onlinetools.ups.com/security/v1/oauth/token';
 const UPS_TRACKING_BASE_URL = 'https://onlinetools.ups.com/api/track/v1/details/';
 
 // 3. SHIPSTATION CREDENTIALS (REPLACE WITH YOURS)
-const SS_API_KEY = process.env.SS_API_KEY || '310e27d626ab425fa808c8696486cdcf';
-const SS_API_SECRET = process.env.SS_API_SECRET || '7e5657c37bcd42e087062343ea1edc0f';
-
+if (!process.env.SS_API_KEY || !process.env.SS_API_SECRET) {
+  throw new Error("Missing ShipStation credentials: Set SS_API_KEY and SS_API_SECRET in Render.");
+}
+const SS_API_KEY = process.env.SS_API_KEY;
+const SS_API_SECRET = process.env.SS_API_SECRET;
 // --- IN-MEMORY CACHE ---
 const trackingCache = new Map();
 const CACHE_DURATION_MS = 30 * 60 * 1000; // 30 Minutes
@@ -219,4 +224,5 @@ app.get('/orders/with-tracking', async (req, res) => {
 });
 
 app.listen(PORT, () => console.log(`Backend running on ${PORT}`));
+
 
