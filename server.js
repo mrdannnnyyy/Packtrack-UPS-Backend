@@ -33,8 +33,8 @@ const UPS_OAUTH_URL = 'https://onlinetools.ups.com/security/v1/oauth/token';
 const UPS_TRACKING_BASE_URL = 'https://onlinetools.ups.com/api/track/v1/details/';
 
 // 3. SHIPSTATION CREDENTIALS (REPLACE WITH YOURS)
-const SS_API_KEY = process.env.SS_API_KEY || 'YOUR_SHIPSTATION_API_KEY';
-const SS_API_SECRET = process.env.SS_API_SECRET || 'YOUR_SHIPSTATION_API_SECRET';
+const SS_API_KEY = process.env.SS_API_KEY || '310e27d626ab425fa808c8696486cdcf';
+const SS_API_SECRET = process.env.SS_API_SECRET || '7e5657c37bcd42e087062343ea1edc0f';
 
 // --- IN-MEMORY CACHE ---
 const trackingCache = new Map();
@@ -219,3 +219,4 @@ app.get('/orders/with-tracking', async (req, res) => {
 });
 
 app.listen(PORT, () => console.log(`Backend running on ${PORT}`));
+
