@@ -408,8 +408,11 @@ app.get('/tracking/list', (req, res) => {
         { id: "1Z999999999", status: "In Transit", location: "New York, NY" },
         { id: "1Z888888888", status: "Delivered", location: "Los Angeles, CA" }
     ]);
+// This tells the app to use Google's port, or 8080 if running locally
+const PORT = process.env.PORT || 8080; 
+
+app.listen(PORT, '0.0.0.0', () => {
+    console.log(`Server running on port ${PORT}`);
 });
-app.listen(PORT, () => {
-  console.log(`🚀 BACKEND RUNNING on port ${PORT}`);
-});
+
 
