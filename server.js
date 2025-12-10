@@ -1,5 +1,5 @@
 /* ------------------------------------------------------------------
-   SERVER.JS - DUAL MODULE BACKEND
+   SERVER.JS - PACKTRACK PRO BACKEND (With Deep Tracking Lookup)
    ------------------------------------------------------------------ */
 
 const express = require("express");
@@ -25,7 +25,7 @@ const firebaseConfig = {
 };
 
 initializeApp(firebaseConfig);
-const db = getFirestore(); // Ready for future usage if needed
+const db = getFirestore();
 
 const UPS_CLIENT_ID = process.env.UPS_CLIENT_ID;
 const UPS_CLIENT_SECRET = process.env.UPS_CLIENT_SECRET;
@@ -130,6 +130,18 @@ async function fetchShipStationPage(page = 1, pageSize = 25) {
   }
 }
 
+async function fetchShipmentByOrder(orderId) {
+  try {
+    const res = await axios.get(
+      `https://ssapi.shipstation.com/shipments?orderId=${orderId}`,
+      { headers: { Authorization: `Basic ${SS_AUTH}` }, timeout: 5000 }
+    );
+    return res.data.shipments?.[0]?.trackingNumber || null;
+  } catch (err) {
+    return null;
+  }
+}
+
 /* ==================================================================
    ENDPOINT GROUP 1: ORDERS (Basic Info Only, No Tracking Logic)
    ================================================================== */
@@ -140,9 +152,15 @@ app.get("/orders/basic", async (req, res) => {
 
     const ssData = await fetchShipStationPage(page, limit);
 
-    const normalized = ssData.orders.map(o => {
-      // Resolve Tracking Number safely
+    // Use Promise.all to handle potential async fallbacks
+    const normalized = await Promise.all(ssData.orders.map(async (o) => {
+      // 1. Try resolving tracking from top level or shipments array
       let tn = o.shipments?.[0]?.trackingNumber || o.trackingNumber || null;
+
+      // 2. FALLBACK: If no tracking, try fetching from shipments endpoint
+      if (!tn && o.orderId) {
+         tn = await fetchShipmentByOrder(o.orderId);
+      }
 
       return {
         orderId: String(o.orderId || ""),
@@ -156,7 +174,7 @@ app.get("/orders/basic", async (req, res) => {
         orderTotal: String(o.orderTotal || "0.00"),
         orderStatus: o.orderStatus || "unknown"
       };
-    });
+    }));
 
     res.json({
       data: normalized,
@@ -183,8 +201,8 @@ app.get("/tracking/list", async (req, res) => {
 
     const enriched = await Promise.all(ssData.orders.map(async (o) => {
       let tn = o.shipments?.[0]?.trackingNumber || o.trackingNumber || null;
+      if (!tn && o.orderId) tn = await fetchShipmentByOrder(o.orderId);
       
-      // UPS Call (Cached or Fresh)
       const ups = tn ? await trackUPS(tn) : createSafeUPSObject("No Tracking", false);
 
       return {
@@ -216,9 +234,7 @@ app.get("/tracking/list", async (req, res) => {
 /* --- SINGLE TRACKING REFRESH --- */
 app.post("/tracking/single", async (req, res) => {
   const { trackingNumber } = req.body;
-  // Force delete from cache to ensure fresh update
   if(trackingCache.has(trackingNumber)) trackingCache.delete(trackingNumber);
-  
   const result = await trackUPS(trackingNumber);
   res.json({
     upsStatus: result.status,
