@@ -389,6 +389,27 @@ app.get("/", (req, res) => {
 /* ------------------------------------------------------------------
    START SERVER
    ------------------------------------------------------------------ */
+// --- Add these missing routes to fix the 404 errors ---
+
+// Fix for: "Cannot GET /orders/basic"
+app.get('/orders/basic', (req, res) => {
+    // TODO: Replace this mock data with your actual ShipStation logic
+    res.json({
+        totalOrders: 120,
+        pendingOrders: 15,
+        shippedOrders: 105
+    });
+});
+
+// Fix for: "Cannot GET /tracking/list"
+app.get('/tracking/list', (req, res) => {
+    // TODO: Replace this mock data with your actual UPS/Tracking logic
+    res.json([
+        { id: "1Z999999999", status: "In Transit", location: "New York, NY" },
+        { id: "1Z888888888", status: "Delivered", location: "Los Angeles, CA" }
+    ]);
+});
 app.listen(PORT, () => {
   console.log(`🚀 BACKEND RUNNING on port ${PORT}`);
 });
+
