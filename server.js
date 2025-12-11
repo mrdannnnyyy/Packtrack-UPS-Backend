@@ -63,7 +63,8 @@ async function trackWithUPS(trackingNumber) {
         if (Date.now() - cached.timestamp < TRACKING_CACHE_MS) return cached.data;
     }
 
-    const fallback = { status: "Shipped", location: "ShipStation Label", eta: "Pending" };
+    // Default Fallback
+    const fallback = { status: "Shipped", location: "Label Created", eta: "Pending" };
     if (!trackingNumber.startsWith('1Z')) return fallback;
 
     try {
@@ -84,11 +85,17 @@ async function trackWithUPS(trackingNumber) {
         const activity = pkg?.activity?.[0];
         const formatUPSDate = (d) => d && d.length === 8 ? `${d.substr(4,2)}/${d.substr(6,2)}/${d.substr(0,4)}` : "Pending";
 
+        // Logic to handle "Label Created" vs "Actual Location"
+        let loc = "In Transit";
+        if (activity?.location?.address?.city) {
+            loc = `${activity.location.address.city}, ${activity.location.address.stateProvince}`;
+        } else if (activity?.status?.description?.includes("Label")) {
+            loc = "Pre-Transit";
+        }
+
         const result = {
             status: activity?.status?.description || "In Transit",
-            location: activity?.location?.address?.city 
-                ? `${activity.location.address.city}, ${activity.location.address.stateProvince}` 
-                : "In Transit",
+            location: loc,
             eta: formatUPSDate(pkg?.deliveryDate?.[0]?.date)
         };
 
@@ -129,9 +136,17 @@ async function fetchRealOrders(page = 1) {
                 items: s.shipmentItems ? s.shipmentItems.map(i => i.name).join(", ") : "",
                 trackingNumber: trackingNumber,
                 carrierCode: s.carrierCode || "ups",
+                
+                // --- FIX: SEND BOTH NAMES SO FRONTEND FINDS IT ---
                 upsStatus: upsData.status,
                 upsLocation: upsData.location,
                 upsEta: upsData.eta,
+                
+                // MAPPED ALIASES (This fixes the empty columns)
+                status: upsData.status,
+                location: upsData.location, 
+                eta: upsData.eta, 
+                
                 orderStatus: "shipped",
                 orderTotal: "0.00"
             };
@@ -147,7 +162,7 @@ async function fetchRealOrders(page = 1) {
 
 // --- ROUTES ---
 
-app.get('/', (req, res) => res.status(200).send('PackTrack v13 (Smart Redirect) Running'));
+app.get('/', (req, res) => res.status(200).send('PackTrack v14 (Mapping Fix) Running'));
 
 app.get('/orders', async (req, res) => {
     const page = parseInt(req.query.page, 10) || 1;
@@ -180,8 +195,7 @@ app.post('/sync/orders', async (req, res) => {
     else res.status(500).json({ success: false });
 });
 
-// --- NEW FEATURE: SMART REDIRECT ---
-// If you visit /1Z... it redirects to UPS automatically!
+// SMART REDIRECT (Keep this!)
 app.get('/:id', (req, res) => {
     const id = req.params.id;
     if (id.startsWith('1Z')) {
@@ -193,5 +207,5 @@ app.get('/:id', (req, res) => {
 
 const PORT = process.env.PORT || 8080;
 app.listen(PORT, '0.0.0.0', () => {
-    console.log(`🚀 Server v13 (Smart Redirect) running on port ${PORT}`);
+    console.log(`🚀 Server v14 (Mapping Fix) running on port ${PORT}`);
 });
