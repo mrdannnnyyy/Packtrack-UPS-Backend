@@ -1,6 +1,7 @@
 {
   "name": "packtrack-backend",
   "version": "1.0.0",
+  "description": "Direct ShipStation Backend",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
@@ -15,5 +16,3 @@
     "node": ">=18.0.0"
   }
 }
-
-
