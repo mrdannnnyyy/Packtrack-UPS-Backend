@@ -9,6 +9,7 @@ const { initializeApp } = require("firebase/app");
 const { 
   getFirestore, collection, getDocs, doc, setDoc, updateDoc, query, orderBy, limit 
 } = require("firebase/firestore");
+require('dotenv').config(); // Load local .env if present
 
 const app = express();
 const PORT = process.env.PORT || 8080;
@@ -45,6 +46,7 @@ let LAST_SYNC = 0;
 async function hydrateCache() {
   console.log("Hydrating Cache from Firestore...");
   try {
+    // Orders by shipDate descending
     const q = query(collection(db, ORDERS_COL), orderBy("shipDate", "desc"), limit(2000));
     const snap = await getDocs(q);
     ORDERS_CACHE = snap.docs.map(d => d.data());
@@ -117,6 +119,13 @@ async function fetchLiveUPS(trackingNumber) {
 }
 
 /* ==================================================================
+   ENDPOINT 0: HEALTH CHECK
+   ================================================================== */
+app.get('/', (req, res) => {
+    res.status(200).send('PackTrack Backend v4 (Fixed SortBy) is Running!');
+});
+
+/* ==================================================================
    ENDPOINT 1: SYNC JOB (Background Task)
    ================================================================== */
 app.post("/sync/orders", async (req, res) => {
@@ -128,8 +137,9 @@ app.post("/sync/orders", async (req, res) => {
 
     // Fetch up to 5 pages (2500 orders)
     while (keepFetching) {
+      // FIXED: Changed sortBy=shipDate to sortBy=OrderDate to prevent API Crash
       const ssRes = await axios.get(
-        `https://ssapi.shipstation.com/orders?orderStatus=shipped&page=${page}&pageSize=500&sortBy=shipDate&sortDir=DESC`,
+        `https://ssapi.shipstation.com/orders?orderStatus=shipped&page=${page}&pageSize=500&sortBy=OrderDate&sortDir=DESC`,
         { headers: { Authorization: `Basic ${SS_AUTH}` } }
       );
       
@@ -281,6 +291,11 @@ app.post("/tracking/single", async (req, res) => {
     console.error("Tracking Update Failed:", err.message);
     res.status(500).json({ error: "UPS Update Failed" });
   }
+});
+
+// Link Fix: Prevent 404 on click
+app.get('/:trackingId/list', (req, res) => {
+    res.json({ id: req.params.trackingId, status: "Unknown", location: "Lookup Pending" });
 });
 
 app.listen(PORT, () => console.log(`BACKEND RUNNING on ${PORT}`));
