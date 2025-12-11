@@ -17,6 +17,16 @@ const SS_AUTH = SS_API_KEY && SS_API_SECRET
 
 const PAGE_SIZE = 50;
 const MAX_PAGES = 100; // safety valve to avoid infinite loops
+const CACHE_TTL_MS = 30000; // avoid hammering ShipStation; adjust if needed
+
+let ordersCache = {
+    fetchedAt: 0,
+    data: []
+};
+
+function sleep(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+}
 
 // --- HELPER: Fetch a single page from ShipStation ---
 async function fetchShipStationPage(page = 1) {
@@ -35,6 +45,11 @@ async function fetchShipStationPage(page = 1) {
 
 // --- HELPER: Fetch all pages from ShipStation ---
 async function fetchRealOrders() {
+    const now = Date.now();
+    if (ordersCache.fetchedAt && now - ordersCache.fetchedAt < CACHE_TTL_MS) {
+        return ordersCache.data;
+    }
+
     if (!SS_AUTH) {
         console.error("API keys missing. Please set SS_API_KEY and SS_API_SECRET.");
         return [];
@@ -56,11 +71,12 @@ async function fetchRealOrders() {
                 break; // last page reached
             }
             page += 1;
+            await sleep(200); // small pause to be gentle with rate limits
         }
 
         console.log(`Success! Found ${allOrders.length} orders across ${page} page(s).`);
 
-        return allOrders.map(o => ({
+        const mapped = allOrders.map(o => ({
             orderId: String(o.orderId),
             orderNumber: o.orderNumber,
             shipDate: o.shipDate ? o.shipDate.split('T')[0] : "N/A",
@@ -75,7 +91,14 @@ async function fetchRealOrders() {
             upsEta: "Pending"
         }));
 
+        ordersCache = { fetchedAt: Date.now(), data: mapped };
+        return mapped;
+
     } catch (error) {
+        if (error.response?.status === 429) {
+            console.error("ShipStation Error: Too Many Requests. Using last cached data if available.");
+            if (ordersCache.data.length) return ordersCache.data;
+        }
         const details = error.response ? error.response.data : error.message;
         console.error("ShipStation Error:", details);
         return [];
@@ -88,11 +111,16 @@ app.get('/', (req, res) => res.status(200).send('PackTrack DIRECT Backend Runnin
 // 2. GET ORDERS (For the Table)
 app.get('/orders', async (req, res) => {
     const orders = await fetchRealOrders();
+    const page = parseInt(req.query.page, 10) || 1;
+    const limit = parseInt(req.query.limit, 10) || orders.length || 1;
+    const start = (page - 1) * limit;
+    const paged = orders.slice(start, start + limit);
+    const totalPages = Math.max(1, Math.ceil(orders.length / limit));
     res.json({
-        data: orders,
+        data: paged,
         total: orders.length,
-        page: 1,
-        totalPages: 1,
+        page,
+        totalPages,
         lastSync: Date.now()
     });
 });
@@ -113,12 +141,18 @@ app.get('/tracking', async (req, res) => {
             trackingUrl: `https://www.ups.com/track?tracknum=${o.trackingNumber}`,
             isError: false
         }));
-    
+
+    const page = parseInt(req.query.page, 10) || 1;
+    const limit = parseInt(req.query.limit, 10) || trackable.length || 1;
+    const start = (page - 1) * limit;
+    const paged = trackable.slice(start, start + limit);
+    const totalPages = Math.max(1, Math.ceil(trackable.length / limit));
+
     res.json({
-        data: trackable,
+        data: paged,
         total: trackable.length,
-        page: 1,
-        totalPages: 1
+        page,
+        totalPages
     });
 });
 
