@@ -10,34 +10,35 @@ app.use(express.json());
 // --- AUTHENTICATION ---
 const SS_API_KEY = process.env.SS_API_KEY;
 const SS_API_SECRET = process.env.SS_API_SECRET;
-const SS_AUTH = Buffer.from(`${SS_API_KEY}:${SS_API_SECRET}`).toString('base64');
+// Basic Auth String for ShipStation (only if keys are present)
+const SS_AUTH = SS_API_KEY && SS_API_SECRET
+    ? Buffer.from(`${SS_API_KEY}:${SS_API_SECRET}`).toString('base64')
+    : null;
 
 // --- HELPER: Fetch from ShipStation ---
 async function fetchRealOrders() {
-    // Safety check: Are keys missing?
-    if (!SS_API_KEY || !SS_API_SECRET) {
-        console.error("❌ API KEYS MISSING. Please check Cloud Run Environment Variables.");
+    if (!SS_AUTH) {
+        console.error("API keys missing. Please set SS_API_KEY and SS_API_SECRET.");
         return [];
     }
 
     try {
-        console.log("🔌 Fetching live orders from ShipStation...");
-        
-        // CRITICAL FIX: Changed 'sortBy=shipDate' to 'sortBy=OrderDate'
+        console.log("Fetching live orders from ShipStation...");
+
         const response = await axios.get(
-            `https://ssapi.shipstation.com/orders?orderStatus=shipped&page=1&pageSize=50&sortBy=OrderDate&sortDir=DESC`,
-            { 
-                headers: { 
+            "https://ssapi.shipstation.com/orders?orderStatus=shipped&page=1&pageSize=50&sortBy=OrderDate&sortDir=DESC",
+            {
+                headers: {
                     Authorization: `Basic ${SS_AUTH}`,
                     "Content-Type": "application/json"
-                } 
+                }
             }
         );
 
-        console.log(`✅ Success! Found ${response.data.orders.length} orders.`);
-        
-        // Map ShipStation data to your Table format
-        return response.data.orders.map(o => ({
+        const orders = Array.isArray(response.data?.orders) ? response.data.orders : [];
+        console.log(`Success! Found ${orders.length} orders.`);
+
+        return orders.map(o => ({
             orderId: String(o.orderId),
             orderNumber: o.orderNumber,
             shipDate: o.shipDate ? o.shipDate.split('T')[0] : "N/A",
@@ -53,7 +54,8 @@ async function fetchRealOrders() {
         }));
 
     } catch (error) {
-        console.error("❌ ShipStation Error:", error.response ? error.response.data : error.message);
+        const details = error.response ? error.response.data : error.message;
+        console.error("ShipStation Error:", details);
         return [];
     }
 }
@@ -110,10 +112,11 @@ app.post('/sync/orders', async (req, res) => {
 
 // 5. LINK FIX (Prevents 404 Error when clicking tracking links)
 app.get('/:trackingId/list', (req, res) => {
+    // This dummy response stops the 404 error so the page can load
     res.json({ id: req.params.trackingId, status: "Unknown", location: "Lookup Pending" });
 });
 
 const PORT = process.env.PORT || 8080;
 app.listen(PORT, '0.0.0.0', () => {
-    console.log(`🚀 Server v5 (Direct Mode + Fix) running on port ${PORT}`);
+    console.log(`Server v5 (Direct Mode + Fix) running on port ${PORT}`);
 });
