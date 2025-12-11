@@ -59,6 +59,15 @@ async function fetchRealOrders() {
             while (page <= MAX_PAGES) {
                 const pageOrders = await fetchShipStationPage(page);
                 if (!pageOrders.length) break;
+                
+                // --- TARGETED DEBUG: PRINT ONLY TRACKING INFO ---
+                if (page === 1 && pageOrders.length > 0) {
+                    const sample = pageOrders[0];
+                    console.log("🔍 [DEBUG] TRACKING CHECK FOR ORDER:", sample.orderNumber);
+                    console.log("👉 Root trackingNumber:", sample.trackingNumber);
+                    console.log("👉 Shipments Array:", JSON.stringify(sample.shipments));
+                }
+                
                 allOrders.push(...pageOrders);
                 if (pageOrders.length < PAGE_SIZE) break;
                 page++;
@@ -68,12 +77,10 @@ async function fetchRealOrders() {
             console.log(`✅ Loaded ${allOrders.length} orders.`);
 
             const mapped = allOrders.map(o => {
-                // --- V9: AGGRESSIVE TRACKING SEARCH ---
                 let finalTracking = null;
                 
                 // 1. Check inside 'shipments' array (Priority)
                 if (o.shipments && o.shipments.length > 0) {
-                    // Find the first valid tracking number
                     const validShipment = o.shipments.find(s => s.trackingNumber && s.trackingNumber.length > 5);
                     if (validShipment) {
                         finalTracking = validShipment.trackingNumber;
@@ -96,7 +103,7 @@ async function fetchRealOrders() {
                     shipDate: o.shipDate ? o.shipDate.split('T')[0] : "N/A",
                     customerName: o.billTo ? o.billTo.name : "Unknown",
                     items: o.items ? o.items.map(i => i.name).join(", ") : "",
-                    trackingNumber: finalTracking, // Using the found number
+                    trackingNumber: finalTracking,
                     carrierCode: o.carrierCode || "ups",
                     orderTotal: String(o.orderTotal),
                     orderStatus: o.orderStatus,
@@ -121,7 +128,7 @@ async function fetchRealOrders() {
 }
 
 // 1. Health Check
-app.get('/', (req, res) => res.status(200).send('PackTrack V9 (Aggressive Tracking Fix) Running'));
+app.get('/', (req, res) => res.status(200).send('PackTrack V10 (Targeted Debug) Running'));
 
 // 2. GET ORDERS
 app.get('/orders', async (req, res) => {
@@ -183,5 +190,5 @@ app.get('/:trackingId/list', (req, res) => {
 
 const PORT = process.env.PORT || 8080;
 app.listen(PORT, '0.0.0.0', () => {
-    console.log(`🚀 Server v9 (Aggressive Tracking) running on port ${PORT}`);
+    console.log(`🚀 Server v10 (Targeted Debug) running on port ${PORT}`);
 });
