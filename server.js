@@ -85,20 +85,27 @@ async function fetchRealOrders() {
 
             console.log(`Success! Found ${allOrders.length} orders across ${page} page(s).`);
 
-            const mapped = allOrders.map(o => ({
-                orderId: String(o.orderId),
-                orderNumber: o.orderNumber,
-                shipDate: o.shipDate ? o.shipDate.split('T')[0] : "N/A",
-                customerName: o.billTo ? o.billTo.name : "Unknown",
-                items: o.items ? o.items.map(i => i.name).join(", ") : "",
-                trackingNumber: o.shipments && o.shipments[0] ? o.shipments[0].trackingNumber : "No Tracking",
-                carrierCode: o.carrierCode || "ups",
-                orderTotal: String(o.orderTotal),
-                orderStatus: o.orderStatus,
-                upsStatus: "Shipped",
-                upsLocation: "Carrier Facility",
-                upsEta: "Pending"
-            }));
+            const mapped = allOrders.map(o => {
+                // Prefer shipment tracking number, then fall back to top-level trackingNumber
+                const finalTracking = o.shipments && o.shipments.length > 0 && o.shipments[0].trackingNumber
+                    ? o.shipments[0].trackingNumber
+                    : (o.trackingNumber || "No Tracking");
+
+                return {
+                    orderId: String(o.orderId),
+                    orderNumber: o.orderNumber,
+                    shipDate: o.shipDate ? o.shipDate.split('T')[0] : "N/A",
+                    customerName: o.billTo ? o.billTo.name : "Unknown",
+                    items: o.items ? o.items.map(i => i.name).join(", ") : "",
+                    trackingNumber: finalTracking,
+                    carrierCode: o.carrierCode || (o.shipments && o.shipments[0] && o.shipments[0].carrierCode) || "ups",
+                    orderTotal: String(o.orderTotal),
+                    orderStatus: o.orderStatus,
+                    upsStatus: "Shipped",
+                    upsLocation: "Carrier Facility",
+                    upsEta: "Pending"
+                };
+            });
 
             ordersCache = { fetchedAt: Date.now(), data: mapped };
             return mapped;
@@ -191,4 +198,3 @@ const PORT = process.env.PORT || 8080;
 app.listen(PORT, '0.0.0.0', () => {
     console.log(`Server v5 (Direct Mode + Fix) running on port ${PORT}`);
 });
-
