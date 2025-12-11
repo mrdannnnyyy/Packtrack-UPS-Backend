@@ -59,12 +59,6 @@ async function fetchRealOrders() {
             while (page <= MAX_PAGES) {
                 const pageOrders = await fetchShipStationPage(page);
                 if (!pageOrders.length) break;
-                
-                // Debug Log (Still here if we need it)
-                if (page === 1 && pageOrders.length > 0) {
-                    console.log("🔍 [DEBUG] FIRST ORDER SAMPLE:", JSON.stringify(pageOrders[0], null, 2));
-                }
-                
                 allOrders.push(...pageOrders);
                 if (pageOrders.length < PAGE_SIZE) break;
                 page++;
@@ -74,19 +68,19 @@ async function fetchRealOrders() {
             console.log(`✅ Loaded ${allOrders.length} orders.`);
 
             const mapped = allOrders.map(o => {
-                // --- V9 FIX: AGGRESSIVE TRACKING SEARCH ---
+                // --- V9: AGGRESSIVE TRACKING SEARCH ---
                 let finalTracking = null;
                 
                 // 1. Check inside 'shipments' array (Priority)
                 if (o.shipments && o.shipments.length > 0) {
-                    // Look for the first non-empty tracking number in shipments
+                    // Find the first valid tracking number
                     const validShipment = o.shipments.find(s => s.trackingNumber && s.trackingNumber.length > 5);
                     if (validShipment) {
                         finalTracking = validShipment.trackingNumber;
                     }
                 } 
                 
-                // 2. If STILL null, check the top-level 'trackingNumber' field
+                // 2. If missing, check the top-level 'trackingNumber' field
                 if (!finalTracking && o.trackingNumber) {
                     finalTracking = o.trackingNumber;
                 }
@@ -102,7 +96,7 @@ async function fetchRealOrders() {
                     shipDate: o.shipDate ? o.shipDate.split('T')[0] : "N/A",
                     customerName: o.billTo ? o.billTo.name : "Unknown",
                     items: o.items ? o.items.map(i => i.name).join(", ") : "",
-                    trackingNumber: finalTracking, // Using the new variable
+                    trackingNumber: finalTracking, // Using the found number
                     carrierCode: o.carrierCode || "ups",
                     orderTotal: String(o.orderTotal),
                     orderStatus: o.orderStatus,
@@ -127,7 +121,7 @@ async function fetchRealOrders() {
 }
 
 // 1. Health Check
-app.get('/', (req, res) => res.status(200).send('PackTrack V9 (Logic Fix) Running'));
+app.get('/', (req, res) => res.status(200).send('PackTrack V9 (Aggressive Tracking Fix) Running'));
 
 // 2. GET ORDERS
 app.get('/orders', async (req, res) => {
@@ -189,5 +183,5 @@ app.get('/:trackingId/list', (req, res) => {
 
 const PORT = process.env.PORT || 8080;
 app.listen(PORT, '0.0.0.0', () => {
-    console.log(`🚀 Server v9 (Logic Fix) running on port ${PORT}`);
+    console.log(`🚀 Server v9 (Aggressive Tracking) running on port ${PORT}`);
 });
