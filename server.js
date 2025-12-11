@@ -15,7 +15,25 @@ const SS_AUTH = SS_API_KEY && SS_API_SECRET
     ? Buffer.from(`${SS_API_KEY}:${SS_API_SECRET}`).toString('base64')
     : null;
 
-// --- HELPER: Fetch from ShipStation ---
+const PAGE_SIZE = 50;
+const MAX_PAGES = 100; // safety valve to avoid infinite loops
+
+// --- HELPER: Fetch a single page from ShipStation ---
+async function fetchShipStationPage(page = 1) {
+    const response = await axios.get(
+        `https://ssapi.shipstation.com/orders?orderStatus=shipped&page=${page}&pageSize=${PAGE_SIZE}&sortBy=OrderDate&sortDir=DESC`,
+        {
+            headers: {
+                Authorization: `Basic ${SS_AUTH}`,
+                "Content-Type": "application/json"
+            }
+        }
+    );
+    const orders = Array.isArray(response.data?.orders) ? response.data.orders : [];
+    return orders;
+}
+
+// --- HELPER: Fetch all pages from ShipStation ---
 async function fetchRealOrders() {
     if (!SS_AUTH) {
         console.error("API keys missing. Please set SS_API_KEY and SS_API_SECRET.");
@@ -23,22 +41,26 @@ async function fetchRealOrders() {
     }
 
     try {
-        console.log("Fetching live orders from ShipStation...");
+        console.log("Fetching live orders from ShipStation (all pages)...");
+        let page = 1;
+        const allOrders = [];
 
-        const response = await axios.get(
-            "https://ssapi.shipstation.com/orders?orderStatus=shipped&page=1&pageSize=50&sortBy=OrderDate&sortDir=DESC",
-            {
-                headers: {
-                    Authorization: `Basic ${SS_AUTH}`,
-                    "Content-Type": "application/json"
-                }
+        while (page <= MAX_PAGES) {
+            const pageOrders = await fetchShipStationPage(page);
+            if (!pageOrders.length) {
+                break; // no more orders returned
             }
-        );
 
-        const orders = Array.isArray(response.data?.orders) ? response.data.orders : [];
-        console.log(`Success! Found ${orders.length} orders.`);
+            allOrders.push(...pageOrders);
+            if (pageOrders.length < PAGE_SIZE) {
+                break; // last page reached
+            }
+            page += 1;
+        }
 
-        return orders.map(o => ({
+        console.log(`Success! Found ${allOrders.length} orders across ${page} page(s).`);
+
+        return allOrders.map(o => ({
             orderId: String(o.orderId),
             orderNumber: o.orderNumber,
             shipDate: o.shipDate ? o.shipDate.split('T')[0] : "N/A",
