@@ -24,7 +24,6 @@ let inFlightOrders = null;
 
 function sleep(ms) { return new Promise(resolve => setTimeout(resolve, ms)); }
 
-// --- HELPER: Fetch a single page ---
 async function fetchShipStationPage(page = 1) {
     const response = await axios.get(
         `https://ssapi.shipstation.com/orders?orderStatus=shipped&page=${page}&pageSize=${PAGE_SIZE}&sortBy=OrderDate&sortDir=DESC`,
@@ -38,7 +37,6 @@ async function fetchShipStationPage(page = 1) {
     return Array.isArray(response.data?.orders) ? response.data.orders : [];
 }
 
-// --- HELPER: Fetch ALL pages ---
 async function fetchRealOrders() {
     const now = Date.now();
     if (ordersCache.fetchedAt && now - ordersCache.fetchedAt < CACHE_TTL_MS) {
@@ -54,7 +52,7 @@ async function fetchRealOrders() {
         }
 
         try {
-            console.log("🔌 Connecting to ShipStation (Reading all pages)...");
+            console.log("🔌 Connecting to ShipStation...");
             let page = 1;
             const allOrders = [];
 
@@ -62,10 +60,9 @@ async function fetchRealOrders() {
                 const pageOrders = await fetchShipStationPage(page);
                 if (!pageOrders.length) break;
                 
-                // --- DEBUG: LOG THE FIRST ORDER TO SEE STRUCTURE ---
-                // This is the CRITICAL part you are missing in v5
+                // Debug Log (Still here if we need it)
                 if (page === 1 && pageOrders.length > 0) {
-                    console.log("🔍 [DEBUG] RAW ORDER DATA:", JSON.stringify(pageOrders[0], null, 2));
+                    console.log("🔍 [DEBUG] FIRST ORDER SAMPLE:", JSON.stringify(pageOrders[0], null, 2));
                 }
                 
                 allOrders.push(...pageOrders);
@@ -74,17 +71,29 @@ async function fetchRealOrders() {
                 await sleep(PAGE_DELAY_MS);
             }
 
-            console.log(`✅ Success! Loaded ${allOrders.length} total orders.`);
+            console.log(`✅ Loaded ${allOrders.length} orders.`);
 
             const mapped = allOrders.map(o => {
-                // ROBUST TRACKING FINDER
-                let finalTracking = "No Tracking";
+                // --- V9 FIX: AGGRESSIVE TRACKING SEARCH ---
+                let finalTracking = null;
                 
+                // 1. Check inside 'shipments' array (Priority)
                 if (o.shipments && o.shipments.length > 0) {
-                    finalTracking = o.shipments[0].trackingNumber || "No Tracking";
+                    // Look for the first non-empty tracking number in shipments
+                    const validShipment = o.shipments.find(s => s.trackingNumber && s.trackingNumber.length > 5);
+                    if (validShipment) {
+                        finalTracking = validShipment.trackingNumber;
+                    }
                 } 
-                else if (o.trackingNumber) {
+                
+                // 2. If STILL null, check the top-level 'trackingNumber' field
+                if (!finalTracking && o.trackingNumber) {
                     finalTracking = o.trackingNumber;
+                }
+
+                // 3. Fallback
+                if (!finalTracking) {
+                    finalTracking = "No Tracking";
                 }
 
                 return {
@@ -93,7 +102,7 @@ async function fetchRealOrders() {
                     shipDate: o.shipDate ? o.shipDate.split('T')[0] : "N/A",
                     customerName: o.billTo ? o.billTo.name : "Unknown",
                     items: o.items ? o.items.map(i => i.name).join(", ") : "",
-                    trackingNumber: finalTracking,
+                    trackingNumber: finalTracking, // Using the new variable
                     carrierCode: o.carrierCode || "ups",
                     orderTotal: String(o.orderTotal),
                     orderStatus: o.orderStatus,
@@ -118,7 +127,7 @@ async function fetchRealOrders() {
 }
 
 // 1. Health Check
-app.get('/', (req, res) => res.status(200).send('PackTrack DEBUG Backend Running'));
+app.get('/', (req, res) => res.status(200).send('PackTrack V9 (Logic Fix) Running'));
 
 // 2. GET ORDERS
 app.get('/orders', async (req, res) => {
@@ -180,6 +189,5 @@ app.get('/:trackingId/list', (req, res) => {
 
 const PORT = process.env.PORT || 8080;
 app.listen(PORT, '0.0.0.0', () => {
-    // THIS LINE IS HOW WE KNOW IF IT WORKED
-    console.log(`🚀 Server v8 (Debug Mode) running on port ${PORT}`);
+    console.log(`🚀 Server v9 (Logic Fix) running on port ${PORT}`);
 });
