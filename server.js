@@ -10,7 +10,6 @@ app.use(express.json());
 // --- AUTHENTICATION ---
 const SS_API_KEY = process.env.SS_API_KEY;
 const SS_API_SECRET = process.env.SS_API_SECRET;
-// Basic Auth String for ShipStation
 const SS_AUTH = Buffer.from(`${SS_API_KEY}:${SS_API_SECRET}`).toString('base64');
 
 // --- HELPER: Fetch from ShipStation ---
@@ -111,7 +110,6 @@ app.post('/sync/orders', async (req, res) => {
 
 // 5. LINK FIX (Prevents 404 Error when clicking tracking links)
 app.get('/:trackingId/list', (req, res) => {
-    // This dummy response stops the 404 error so the page can load
     res.json({ id: req.params.trackingId, status: "Unknown", location: "Lookup Pending" });
 });
 
@@ -119,4 +117,3 @@ const PORT = process.env.PORT || 8080;
 app.listen(PORT, '0.0.0.0', () => {
     console.log(`🚀 Server v5 (Direct Mode + Fix) running on port ${PORT}`);
 });
-
