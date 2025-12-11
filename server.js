@@ -63,8 +63,7 @@ async function trackWithUPS(trackingNumber) {
         if (Date.now() - cached.timestamp < TRACKING_CACHE_MS) return cached.data;
     }
 
-    // Default Fallback
-    const fallback = { status: "Shipped", location: "Label Created", eta: "Pending" };
+    const fallback = { status: "Shipped", location: "Label Created", eta: "Pending Pickup" };
     if (!trackingNumber.startsWith('1Z')) return fallback;
 
     try {
@@ -83,12 +82,25 @@ async function trackWithUPS(trackingNumber) {
 
         const pkg = response.data.trackResponse?.shipment?.[0]?.package?.[0];
         const activity = pkg?.activity?.[0];
-        const formatUPSDate = (d) => d && d.length === 8 ? `${d.substr(4,2)}/${d.substr(6,2)}/${d.substr(0,4)}` : "Pending";
+        
+        // --- FIX: BETTER ETA LOGIC ---
+        // 1. Try "deliveryDate" (Confirmed delivery)
+        // 2. Try "date" (Scheduled delivery)
+        // 3. Fallback to "Pending Pickup" if label is new
+        let rawDate = pkg?.deliveryDate?.[0]?.date || pkg?.date; 
+        
+        let etaDisplay = "Pending Pickup";
+        if (rawDate && rawDate.length === 8) {
+             etaDisplay = `${rawDate.substr(4,2)}/${rawDate.substr(6,2)}/${rawDate.substr(0,4)}`;
+        }
 
-        // Logic to handle "Label Created" vs "Actual Location"
+        // --- LOCATION LOGIC ---
         let loc = "In Transit";
-        if (activity?.location?.address?.city) {
-            loc = `${activity.location.address.city}, ${activity.location.address.stateProvince}`;
+        const city = activity?.location?.address?.city;
+        const state = activity?.location?.address?.stateProvince;
+        
+        if (city && state) {
+            loc = `${city}, ${state}`;
         } else if (activity?.status?.description?.includes("Label")) {
             loc = "Pre-Transit";
         }
@@ -96,7 +108,7 @@ async function trackWithUPS(trackingNumber) {
         const result = {
             status: activity?.status?.description || "In Transit",
             location: loc,
-            eta: formatUPSDate(pkg?.deliveryDate?.[0]?.date)
+            eta: etaDisplay
         };
 
         trackingCache.set(trackingNumber, { data: result, timestamp: Date.now() });
@@ -122,7 +134,7 @@ async function fetchRealOrders(page = 1) {
         
         const enriched = await Promise.all(shipments.map(async (s) => {
             const trackingNumber = s.trackingNumber || "No Tracking";
-            let upsData = { status: "Shipped", location: "Label Created", eta: "Pending" };
+            let upsData = { status: "Shipped", location: "Label Created", eta: "Pending Pickup" };
             
             if (trackingNumber !== "No Tracking") {
                 upsData = await trackWithUPS(trackingNumber);
@@ -137,12 +149,10 @@ async function fetchRealOrders(page = 1) {
                 trackingNumber: trackingNumber,
                 carrierCode: s.carrierCode || "ups",
                 
-                // --- FIX: SEND BOTH NAMES SO FRONTEND FINDS IT ---
+                // MAPPED ALIASES
                 upsStatus: upsData.status,
                 upsLocation: upsData.location,
                 upsEta: upsData.eta,
-                
-                // MAPPED ALIASES (This fixes the empty columns)
                 status: upsData.status,
                 location: upsData.location, 
                 eta: upsData.eta, 
@@ -162,7 +172,7 @@ async function fetchRealOrders(page = 1) {
 
 // --- ROUTES ---
 
-app.get('/', (req, res) => res.status(200).send('PackTrack v14 (Mapping Fix) Running'));
+app.get('/', (req, res) => res.status(200).send('PackTrack v15 (ETA Fix) Running'));
 
 app.get('/orders', async (req, res) => {
     const page = parseInt(req.query.page, 10) || 1;
@@ -195,7 +205,7 @@ app.post('/sync/orders', async (req, res) => {
     else res.status(500).json({ success: false });
 });
 
-// SMART REDIRECT (Keep this!)
+// SMART REDIRECT
 app.get('/:id', (req, res) => {
     const id = req.params.id;
     if (id.startsWith('1Z')) {
@@ -207,5 +217,5 @@ app.get('/:id', (req, res) => {
 
 const PORT = process.env.PORT || 8080;
 app.listen(PORT, '0.0.0.0', () => {
-    console.log(`🚀 Server v14 (Mapping Fix) running on port ${PORT}`);
+    console.log(`🚀 Server v15 (ETA Fix) running on port ${PORT}`);
 });
