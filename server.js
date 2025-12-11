@@ -11,6 +11,7 @@ app.use(express.json());
 // --- AUTHENTICATION ---
 const SS_API_KEY = process.env.SS_API_KEY;
 const SS_API_SECRET = process.env.SS_API_SECRET;
+// Basic Auth String for ShipStation
 const SS_AUTH = Buffer.from(`${SS_API_KEY}:${SS_API_SECRET}`).toString('base64');
 
 // --- HELPER: Fetch from ShipStation ---
@@ -25,7 +26,6 @@ async function fetchRealOrders() {
         console.log("🔌 Fetching live orders from ShipStation...");
         
         // CRITICAL FIX: Changed 'sortBy=shipDate' to 'sortBy=OrderDate'
-        // This prevents the "Invalid sortBy" crash you saw earlier.
         const response = await axios.get(
             `https://ssapi.shipstation.com/orders?orderStatus=shipped&page=1&pageSize=50&sortBy=OrderDate&sortDir=DESC`,
             { 
