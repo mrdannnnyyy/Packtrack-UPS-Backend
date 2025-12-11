@@ -20,7 +20,6 @@ app.get('/', (req, res) => {
 app.get('/orders/basic', async (req, res) => {
     try {
         // TODO: Replace this mock data with actual ShipStation API calls later
-        // Example: const response = await axios.get('https://ssapi.shipstation.com/orders/...')
         
         const mockData = {
             totalOrders: 120,
