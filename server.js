@@ -17,12 +17,15 @@ const SS_AUTH = SS_API_KEY && SS_API_SECRET
 
 const PAGE_SIZE = 50;
 const MAX_PAGES = 100; // safety valve to avoid infinite loops
-const CACHE_TTL_MS = 30000; // avoid hammering ShipStation; adjust if needed
+const CACHE_TTL_MS = 180000; // avoid hammering ShipStation; adjust if needed
+const PAGE_DELAY_MS = 500; // pause between pages to reduce 429s
 
 let ordersCache = {
     fetchedAt: 0,
     data: []
 };
+
+let inFlightOrders = null;
 
 function sleep(ms) {
     return new Promise(resolve => setTimeout(resolve, ms));
@@ -50,59 +53,71 @@ async function fetchRealOrders() {
         return ordersCache.data;
     }
 
-    if (!SS_AUTH) {
-        console.error("API keys missing. Please set SS_API_KEY and SS_API_SECRET.");
-        return [];
+    // Reuse ongoing fetch to avoid concurrent hammering
+    if (inFlightOrders) {
+        return inFlightOrders;
     }
 
-    try {
-        console.log("Fetching live orders from ShipStation (all pages)...");
-        let page = 1;
-        const allOrders = [];
-
-        while (page <= MAX_PAGES) {
-            const pageOrders = await fetchShipStationPage(page);
-            if (!pageOrders.length) {
-                break; // no more orders returned
-            }
-
-            allOrders.push(...pageOrders);
-            if (pageOrders.length < PAGE_SIZE) {
-                break; // last page reached
-            }
-            page += 1;
-            await sleep(200); // small pause to be gentle with rate limits
+    inFlightOrders = (async () => {
+        if (!SS_AUTH) {
+            console.error("API keys missing. Please set SS_API_KEY and SS_API_SECRET.");
+            return [];
         }
 
-        console.log(`Success! Found ${allOrders.length} orders across ${page} page(s).`);
+        try {
+            console.log("Fetching live orders from ShipStation (all pages)...");
+            let page = 1;
+            const allOrders = [];
 
-        const mapped = allOrders.map(o => ({
-            orderId: String(o.orderId),
-            orderNumber: o.orderNumber,
-            shipDate: o.shipDate ? o.shipDate.split('T')[0] : "N/A",
-            customerName: o.billTo ? o.billTo.name : "Unknown",
-            items: o.items ? o.items.map(i => i.name).join(", ") : "",
-            trackingNumber: o.shipments && o.shipments[0] ? o.shipments[0].trackingNumber : "No Tracking",
-            carrierCode: o.carrierCode || "ups",
-            orderTotal: String(o.orderTotal),
-            orderStatus: o.orderStatus,
-            upsStatus: "Shipped",
-            upsLocation: "Carrier Facility",
-            upsEta: "Pending"
-        }));
+            while (page <= MAX_PAGES) {
+                const pageOrders = await fetchShipStationPage(page);
+                if (!pageOrders.length) {
+                    break; // no more orders returned
+                }
 
-        ordersCache = { fetchedAt: Date.now(), data: mapped };
-        return mapped;
+                allOrders.push(...pageOrders);
+                if (pageOrders.length < PAGE_SIZE) {
+                    break; // last page reached
+                }
+                page += 1;
+                await sleep(PAGE_DELAY_MS); // small pause to be gentle with rate limits
+            }
 
-    } catch (error) {
-        if (error.response?.status === 429) {
-            console.error("ShipStation Error: Too Many Requests. Using last cached data if available.");
-            if (ordersCache.data.length) return ordersCache.data;
+            console.log(`Success! Found ${allOrders.length} orders across ${page} page(s).`);
+
+            const mapped = allOrders.map(o => ({
+                orderId: String(o.orderId),
+                orderNumber: o.orderNumber,
+                shipDate: o.shipDate ? o.shipDate.split('T')[0] : "N/A",
+                customerName: o.billTo ? o.billTo.name : "Unknown",
+                items: o.items ? o.items.map(i => i.name).join(", ") : "",
+                trackingNumber: o.shipments && o.shipments[0] ? o.shipments[0].trackingNumber : "No Tracking",
+                carrierCode: o.carrierCode || "ups",
+                orderTotal: String(o.orderTotal),
+                orderStatus: o.orderStatus,
+                upsStatus: "Shipped",
+                upsLocation: "Carrier Facility",
+                upsEta: "Pending"
+            }));
+
+            ordersCache = { fetchedAt: Date.now(), data: mapped };
+            return mapped;
+
+        } catch (error) {
+            if (error.response?.status === 429) {
+                console.error("ShipStation Error: Too Many Requests. Using last cached data if available.");
+                if (ordersCache.data.length) return ordersCache.data;
+            }
+            const details = error.response ? error.response.data : error.message;
+            console.error("ShipStation Error:", details);
+            return [];
+        } finally {
+            // Clear in-flight marker
+            inFlightOrders = null;
         }
-        const details = error.response ? error.response.data : error.message;
-        console.error("ShipStation Error:", details);
-        return [];
-    }
+    })();
+
+    return inFlightOrders;
 }
 
 // 1. Health Check
