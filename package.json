@@ -1,4 +1,3 @@
-cat > package.json << 'EOF'
 {
   "name": "packtrack-backend",
   "version": "1.0.0",
@@ -16,4 +15,5 @@ cat > package.json << 'EOF'
     "node": ">=18.0.0"
   }
 }
-EOF
+
+
