@@ -63,7 +63,9 @@ async function trackWithUPS(trackingNumber) {
         if (Date.now() - cached.timestamp < TRACKING_CACHE_MS) return cached.data;
     }
 
-    const fallback = { status: "Shipped", location: "Label Created", eta: "Pending Pickup" };
+    // DEFAULT VALUES (Strict)
+    const fallback = { status: "Label Created", location: "Pre-Transit", eta: "Pending Scan" };
+    
     if (!trackingNumber.startsWith('1Z')) return fallback;
 
     try {
@@ -81,35 +83,28 @@ async function trackWithUPS(trackingNumber) {
         });
 
         const pkg = response.data.trackResponse?.shipment?.[0]?.package?.[0];
-        const activity = pkg?.activity?.[0];
+        const activity = pkg?.activity?.[0]; // The most recent scan event
         
-        // --- FIX: BETTER ETA LOGIC ---
-        // 1. Try "deliveryDate" (Confirmed delivery)
-        // 2. Try "date" (Scheduled delivery)
-        // 3. Fallback to "Pending Pickup" if label is new
-        let rawDate = pkg?.deliveryDate?.[0]?.date || pkg?.date; 
+        // --- 1. STATUS ---
+        let status = activity?.status?.description || "Label Created";
+
+        // --- 2. LOCATION (Strict) ---
+        // DEFAULT is "Pre-Transit". It ONLY becomes "In Transit" if we find a City.
+        let location = "Pre-Transit";
+        if (activity?.location?.address?.city) {
+            location = `${activity.location.address.city}, ${activity.location.address.stateProvince}`;
+        }
+
+        // --- 3. ETA (Strict) ---
+        // DEFAULT is "Pending Scan". It ONLY shows a date if UPS provides one.
+        let rawDate = pkg?.deliveryDate?.[0]?.date || pkg?.date;
+        let eta = "Pending Scan"; 
         
-        let etaDisplay = "Pending Pickup";
         if (rawDate && rawDate.length === 8) {
-             etaDisplay = `${rawDate.substr(4,2)}/${rawDate.substr(6,2)}/${rawDate.substr(0,4)}`;
+             eta = `${rawDate.substr(4,2)}/${rawDate.substr(6,2)}/${rawDate.substr(0,4)}`;
         }
 
-        // --- LOCATION LOGIC ---
-        let loc = "In Transit";
-        const city = activity?.location?.address?.city;
-        const state = activity?.location?.address?.stateProvince;
-        
-        if (city && state) {
-            loc = `${city}, ${state}`;
-        } else if (activity?.status?.description?.includes("Label")) {
-            loc = "Pre-Transit";
-        }
-
-        const result = {
-            status: activity?.status?.description || "In Transit",
-            location: loc,
-            eta: etaDisplay
-        };
+        const result = { status, location, eta };
 
         trackingCache.set(trackingNumber, { data: result, timestamp: Date.now() });
         return result;
@@ -134,7 +129,9 @@ async function fetchRealOrders(page = 1) {
         
         const enriched = await Promise.all(shipments.map(async (s) => {
             const trackingNumber = s.trackingNumber || "No Tracking";
-            let upsData = { status: "Shipped", location: "Label Created", eta: "Pending Pickup" };
+            
+            // Start with Strict Defaults
+            let upsData = { status: "Label Created", location: "Pre-Transit", eta: "Pending Scan" };
             
             if (trackingNumber !== "No Tracking") {
                 upsData = await trackWithUPS(trackingNumber);
@@ -149,10 +146,11 @@ async function fetchRealOrders(page = 1) {
                 trackingNumber: trackingNumber,
                 carrierCode: s.carrierCode || "ups",
                 
-                // MAPPED ALIASES
+                // MAPPED ALIASES (Sending data to frontend)
                 upsStatus: upsData.status,
                 upsLocation: upsData.location,
                 upsEta: upsData.eta,
+                
                 status: upsData.status,
                 location: upsData.location, 
                 eta: upsData.eta, 
@@ -172,7 +170,7 @@ async function fetchRealOrders(page = 1) {
 
 // --- ROUTES ---
 
-app.get('/', (req, res) => res.status(200).send('PackTrack v15 (ETA Fix) Running'));
+app.get('/', (req, res) => res.status(200).send('PackTrack v17 (Strict Mode) Running'));
 
 app.get('/orders', async (req, res) => {
     const page = parseInt(req.query.page, 10) || 1;
@@ -205,7 +203,6 @@ app.post('/sync/orders', async (req, res) => {
     else res.status(500).json({ success: false });
 });
 
-// SMART REDIRECT
 app.get('/:id', (req, res) => {
     const id = req.params.id;
     if (id.startsWith('1Z')) {
@@ -217,5 +214,5 @@ app.get('/:id', (req, res) => {
 
 const PORT = process.env.PORT || 8080;
 app.listen(PORT, '0.0.0.0', () => {
-    console.log(`🚀 Server v15 (ETA Fix) running on port ${PORT}`);
+    console.log(`🚀 Server v17 (Strict Mode) running on port ${PORT}`);
 });
