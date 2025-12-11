@@ -1,4 +1,3 @@
-cat > server.js << 'EOF'
 const express = require('express');
 const axios = require('axios');
 const cors = require('cors');
@@ -120,4 +119,4 @@ const PORT = process.env.PORT || 8080;
 app.listen(PORT, '0.0.0.0', () => {
     console.log(`🚀 Server v5 (Direct Mode + Fix) running on port ${PORT}`);
 });
-EOF
+
