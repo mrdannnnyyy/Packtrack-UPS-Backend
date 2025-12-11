@@ -16,7 +16,7 @@ const SS_AUTH = SS_API_KEY && SS_API_SECRET
     : null;
 
 const PAGE_SIZE = 50;
-const MAX_PAGES = 100; // safety valve to avoid infinite loops
+const MAX_PAGES = 5; // safety valve to avoid infinite loops
 const CACHE_TTL_MS = 180000; // avoid hammering ShipStation; adjust if needed
 const PAGE_DELAY_MS = 500; // pause between pages to reduce 429s
 
@@ -191,3 +191,4 @@ const PORT = process.env.PORT || 8080;
 app.listen(PORT, '0.0.0.0', () => {
     console.log(`Server v5 (Direct Mode + Fix) running on port ${PORT}`);
 });
+
