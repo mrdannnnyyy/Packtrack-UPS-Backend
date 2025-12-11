@@ -63,7 +63,7 @@ async function trackWithUPS(trackingNumber) {
         if (Date.now() - cached.timestamp < TRACKING_CACHE_MS) return cached.data;
     }
 
-    // DEFAULT VALUES (Strict)
+    // Default Fallback
     const fallback = { status: "Label Created", location: "Pre-Transit", eta: "Pending Scan" };
     
     if (!trackingNumber.startsWith('1Z')) return fallback;
@@ -83,20 +83,18 @@ async function trackWithUPS(trackingNumber) {
         });
 
         const pkg = response.data.trackResponse?.shipment?.[0]?.package?.[0];
-        const activity = pkg?.activity?.[0]; // The most recent scan event
+        const activity = pkg?.activity?.[0]; 
         
-        // --- 1. STATUS ---
+        // --- STATUS ---
         let status = activity?.status?.description || "Label Created";
 
-        // --- 2. LOCATION (Strict) ---
-        // DEFAULT is "Pre-Transit". It ONLY becomes "In Transit" if we find a City.
+        // --- LOCATION ---
         let location = "Pre-Transit";
         if (activity?.location?.address?.city) {
             location = `${activity.location.address.city}, ${activity.location.address.stateProvince}`;
         }
 
-        // --- 3. ETA (Strict) ---
-        // DEFAULT is "Pending Scan". It ONLY shows a date if UPS provides one.
+        // --- ETA ---
         let rawDate = pkg?.deliveryDate?.[0]?.date || pkg?.date;
         let eta = "Pending Scan"; 
         
@@ -129,8 +127,6 @@ async function fetchRealOrders(page = 1) {
         
         const enriched = await Promise.all(shipments.map(async (s) => {
             const trackingNumber = s.trackingNumber || "No Tracking";
-            
-            // Start with Strict Defaults
             let upsData = { status: "Label Created", location: "Pre-Transit", eta: "Pending Scan" };
             
             if (trackingNumber !== "No Tracking") {
@@ -146,14 +142,16 @@ async function fetchRealOrders(page = 1) {
                 trackingNumber: trackingNumber,
                 carrierCode: s.carrierCode || "ups",
                 
-                // MAPPED ALIASES (Sending data to frontend)
+                // --- COMPATIBILITY FIX ---
+                // We now send ALL possible names so the frontend finds what it needs
                 upsStatus: upsData.status,
                 upsLocation: upsData.location,
                 upsEta: upsData.eta,
                 
                 status: upsData.status,
                 location: upsData.location, 
-                eta: upsData.eta, 
+                eta: upsData.eta,
+                expectedDelivery: upsData.eta, // <--- THIS FIXES YOUR FRONTEND
                 
                 orderStatus: "shipped",
                 orderTotal: "0.00"
@@ -170,7 +168,7 @@ async function fetchRealOrders(page = 1) {
 
 // --- ROUTES ---
 
-app.get('/', (req, res) => res.status(200).send('PackTrack v17 (Strict Mode) Running'));
+app.get('/', (req, res) => res.status(200).send('PackTrack v18 (Frontend Match) Running'));
 
 app.get('/orders', async (req, res) => {
     const page = parseInt(req.query.page, 10) || 1;
@@ -214,5 +212,5 @@ app.get('/:id', (req, res) => {
 
 const PORT = process.env.PORT || 8080;
 app.listen(PORT, '0.0.0.0', () => {
-    console.log(`🚀 Server v17 (Strict Mode) running on port ${PORT}`);
+    console.log(`🚀 Server v18 (Frontend Match) running on port ${PORT}`);
 });
