@@ -1,13 +1,32 @@
 const express = require('express');
 const axios = require('axios');
 const cors = require('cors');
+const admin = require('firebase-admin');
 require('dotenv').config();
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 
-// --- CREDENTIALS ---
+// --- 1. FIREBASE SETUP ---
+// We read the JSON key from an Environment Variable for security
+if (process.env.FIREBASE_KEY) {
+    try {
+        const serviceAccount = JSON.parse(process.env.FIREBASE_KEY);
+        admin.initializeApp({
+            credential: admin.credential.cert(serviceAccount)
+        });
+        console.log("🔥 Firebase Connected!");
+    } catch (e) {
+        console.error("❌ Firebase Key Error:", e.message);
+    }
+} else {
+    console.error("⚠️ FATAL: FIREBASE_KEY is missing in Cloud Run variables.");
+}
+
+const db = admin.firestore();
+
+// --- 2. CREDENTIALS ---
 const SS_API_KEY = process.env.SS_API_KEY;
 const SS_API_SECRET = process.env.SS_API_SECRET;
 const SS_AUTH = SS_API_KEY && SS_API_SECRET
@@ -17,21 +36,14 @@ const SS_AUTH = SS_API_KEY && SS_API_SECRET
 const UPS_CLIENT_ID = process.env.UPS_CLIENT_ID;
 const UPS_CLIENT_SECRET = process.env.UPS_CLIENT_SECRET;
 
-// --- CONFIG ---
-const PAGE_SIZE = 50; 
-const TRACKING_CACHE_MS = 15 * 60 * 1000; // 15 mins
-
-// --- IN-MEMORY CACHE ---
-const trackingCache = new Map();
-
-// UPS Token Storage
+// Global UPS Token
 let upsToken = null;
 let upsTokenExpiry = 0;
 
-// --- HELPER: Get UPS Access Token ---
+// --- 3. HELPER FUNCTIONS ---
+
 async function getUPSToken() {
     if (upsToken && Date.now() < upsTokenExpiry) return upsToken;
-
     if (!UPS_CLIENT_ID || !UPS_CLIENT_SECRET) return null;
 
     try {
@@ -39,178 +51,175 @@ async function getUPSToken() {
         const response = await axios.post(
             'https://onlinetools.ups.com/security/v1/oauth/token',
             'grant_type=client_credentials',
-            {
-                headers: {
-                    'Content-Type': 'application/x-www-form-urlencoded',
-                    'Authorization': `Basic ${credentials}`
-                }
-            }
+            { headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'Authorization': `Basic ${credentials}` } }
         );
-        
         upsToken = response.data.access_token;
         upsTokenExpiry = Date.now() + (3500 * 1000); 
         return upsToken;
-    } catch (error) {
-        console.error("❌ UPS Auth Error:", error.response?.data || error.message);
-        return null;
-    }
+    } catch (error) { return null; }
 }
 
-// --- HELPER: Track Single Package ---
 async function trackWithUPS(trackingNumber) {
-    if (trackingCache.has(trackingNumber)) {
-        const cached = trackingCache.get(trackingNumber);
-        if (Date.now() - cached.timestamp < TRACKING_CACHE_MS) return cached.data;
-    }
-
-    // Default Fallback
-    const fallback = { status: "Label Created", location: "Pre-Transit", eta: "Pending Scan" };
-    
-    if (!trackingNumber.startsWith('1Z')) return fallback;
+    // Skip if not UPS
+    if (!trackingNumber.startsWith('1Z')) return { status: "Label Created", location: "Pre-Transit", eta: "Pending Scan" };
 
     try {
         const token = await getUPSToken();
-        if (!token) return fallback;
+        if (!token) throw new Error("No Token");
 
         const url = `https://onlinetools.ups.com/api/track/v1/details/${trackingNumber}?locale=en_US`;
         const response = await axios.get(url, {
-            headers: {
-                'Authorization': `Bearer ${token}`,
-                'transId': `req-${Date.now()}`,
-                'transactionSrc': 'PackTrackPro'
-            },
-            timeout: 5000 
+            headers: { 'Authorization': `Bearer ${token}`, 'transId': `sync-${Date.now()}`, 'transactionSrc': 'PackTrackPro' }
         });
 
         const pkg = response.data.trackResponse?.shipment?.[0]?.package?.[0];
-        const activity = pkg?.activity?.[0]; 
-        
-        // --- STATUS ---
+        const activity = pkg?.activity?.[0];
+
+        // Strict Logic
         let status = activity?.status?.description || "Label Created";
-
-        // --- LOCATION ---
-        let location = "Pre-Transit";
-        if (activity?.location?.address?.city) {
-            location = `${activity.location.address.city}, ${activity.location.address.stateProvince}`;
-        }
-
-        // --- ETA ---
-        let rawDate = pkg?.deliveryDate?.[0]?.date || pkg?.date;
-        let eta = "Pending Scan"; 
+        let location = activity?.location?.address?.city 
+            ? `${activity.location.address.city}, ${activity.location.address.stateProvince}` 
+            : "Pre-Transit";
         
+        let rawDate = pkg?.deliveryDate?.[0]?.date || pkg?.date;
+        let eta = "Pending Scan";
         if (rawDate && rawDate.length === 8) {
              eta = `${rawDate.substr(4,2)}/${rawDate.substr(6,2)}/${rawDate.substr(0,4)}`;
         }
 
-        const result = { status, location, eta };
-
-        trackingCache.set(trackingNumber, { data: result, timestamp: Date.now() });
-        return result;
-
-    } catch (error) {
-        return fallback;
+        return { status, location, eta };
+    } catch (e) {
+        return { status: "Label Created", location: "Pre-Transit", eta: "Pending Scan" };
     }
 }
 
-// --- MAIN: Fetch Shipments + Enrich ---
-async function fetchRealOrders(page = 1) {
-    if (!SS_AUTH) return [];
+// --- 4. THE BACKGROUND SYNC ROBOT ---
+// This function runs every 15 minutes
+async function performSystemSync() {
+    console.log("🤖 Background Sync Started...");
+    
+    // A. Fetch recent 50 shipments from ShipStation
+    const ssRes = await axios.get(
+        `https://ssapi.shipstation.com/shipments?includeShipmentItems=true&page=1&pageSize=50&sortBy=ShipDate&sortDir=DESC`,
+        { headers: { Authorization: `Basic ${SS_AUTH}` } }
+    );
+    
+    const shipments = ssRes.data.shipments || [];
+    console.log(`📦 Analyzing ${shipments.length} shipments...`);
 
-    try {
-        console.log(`🔌 Fetching Shipments Page ${page}...`);
-        const ssRes = await axios.get(
-            `https://ssapi.shipstation.com/shipments?includeShipmentItems=true&page=${page}&pageSize=${PAGE_SIZE}&sortBy=ShipDate&sortDir=DESC`,
-            { headers: { Authorization: `Basic ${SS_AUTH}` } }
-        );
+    const batch = db.batch();
+    let count = 0;
+
+    // B. Process each order
+    for (const s of shipments) {
+        const trackingNumber = s.trackingNumber || "No Tracking";
         
-        const shipments = Array.isArray(ssRes.data?.shipments) ? ssRes.data.shipments : [];
-        
-        const enriched = await Promise.all(shipments.map(async (s) => {
-            const trackingNumber = s.trackingNumber || "No Tracking";
-            let upsData = { status: "Label Created", location: "Pre-Transit", eta: "Pending Scan" };
+        // C. Track with UPS (Only if we have a number)
+        let upsData = { status: "Label Created", location: "Pre-Transit", eta: "Pending Scan" };
+        if (trackingNumber !== "No Tracking") {
+            upsData = await trackWithUPS(trackingNumber);
+        }
+
+        // D. Prepare data for Firebase
+        const orderRef = db.collection('orders').doc(String(s.orderId));
+        const orderData = {
+            orderId: String(s.orderId),
+            orderNumber: s.orderNumber,
+            shipDate: s.shipDate ? s.shipDate.split('T')[0] : "N/A",
+            customerName: s.shipTo ? s.shipTo.name : "Unknown",
+            items: s.shipmentItems ? s.shipmentItems.map(i => i.name).join(", ") : "",
+            trackingNumber: trackingNumber,
+            carrierCode: s.carrierCode || "ups",
             
-            if (trackingNumber !== "No Tracking") {
-                upsData = await trackWithUPS(trackingNumber);
-            }
+            // Unified Status Fields
+            status: upsData.status,
+            location: upsData.location,
+            eta: upsData.eta,
+            expectedDelivery: upsData.eta,
+            
+            lastUpdated: Date.now()
+        };
 
-            return {
-                orderId: String(s.orderId),
-                orderNumber: s.orderNumber,
-                shipDate: s.shipDate ? s.shipDate.split('T')[0] : "N/A",
-                customerName: s.shipTo ? s.shipTo.name : "Unknown",
-                items: s.shipmentItems ? s.shipmentItems.map(i => i.name).join(", ") : "",
-                trackingNumber: trackingNumber,
-                carrierCode: s.carrierCode || "ups",
-                
-                // --- COMPATIBILITY FIX ---
-                // We now send ALL possible names so the frontend finds what it needs
-                upsStatus: upsData.status,
-                upsLocation: upsData.location,
-                upsEta: upsData.eta,
-                
-                status: upsData.status,
-                location: upsData.location, 
-                eta: upsData.eta,
-                expectedDelivery: upsData.eta, // <--- THIS FIXES YOUR FRONTEND
-                
-                orderStatus: "shipped",
-                orderTotal: "0.00"
-            };
-        }));
-
-        return { data: enriched, total: ssRes.data.total, pages: ssRes.data.pages };
-
-    } catch (error) {
-        console.error("❌ Sync Error:", error.message);
-        return { data: [], total: 0, pages: 0 };
+        // E. Add to Batch (Save to DB)
+        batch.set(orderRef, orderData, { merge: true });
+        count++;
     }
+
+    // F. Commit all changes
+    await batch.commit();
+    console.log(`✅ Sync Complete. Updated ${count} orders in Database.`);
+    return count;
 }
 
-// --- ROUTES ---
+// --- 5. ENDPOINTS ---
 
-app.get('/', (req, res) => res.status(200).send('PackTrack v18 (Frontend Match) Running'));
-
+// INSTANT LOAD: Reads from Firebase (Super Fast)
 app.get('/orders', async (req, res) => {
-    const page = parseInt(req.query.page, 10) || 1;
-    const result = await fetchRealOrders(page);
-    res.json({
-        data: result.data,
-        total: result.total,
-        page: page,
-        totalPages: result.pages,
-        lastSync: Date.now()
-    });
+    try {
+        const snapshot = await db.collection('orders')
+            .orderBy('shipDate', 'desc')
+            .limit(50)
+            .get();
+            
+        const orders = snapshot.docs.map(doc => doc.data());
+        
+        res.json({
+            data: orders,
+            total: orders.length,
+            page: 1,
+            totalPages: 1,
+            lastSync: Date.now() // Tells frontend "This is fresh from DB"
+        });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
 });
 
+// Same logic for tracking page
 app.get('/tracking', async (req, res) => {
-    const page = parseInt(req.query.page, 10) || 1;
-    const result = await fetchRealOrders(page);
-    const trackable = result.data.filter(o => o.trackingNumber !== "No Tracking");
-    res.json({
-        data: trackable,
-        total: trackable.length,
-        page: page,
-        totalPages: result.pages
-    });
+    try {
+        const snapshot = await db.collection('orders')
+            .orderBy('shipDate', 'desc')
+            .limit(50)
+            .get();
+        const orders = snapshot.docs.map(doc => doc.data());
+        const trackable = orders.filter(o => o.trackingNumber !== "No Tracking");
+        
+        res.json({ data: trackable, total: trackable.length, page: 1, totalPages: 1 });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
 });
 
+// BACKGROUND TRIGGER (Cloud Scheduler hits this)
+app.post('/sync/system', async (req, res) => {
+    try {
+        const count = await performSystemSync();
+        res.json({ success: true, updated: count });
+    } catch (e) {
+        console.error(e);
+        res.status(500).json({ success: false, error: e.message });
+    }
+});
+
+// Manual Sync Button
 app.post('/sync/orders', async (req, res) => {
-    trackingCache.clear();
-    const result = await fetchRealOrders(1);
-    if (result.data.length > 0) res.json({ success: true, count: result.data.length });
-    else res.status(500).json({ success: false });
+    try {
+        const count = await performSystemSync();
+        res.json({ success: true, count });
+    } catch (e) {
+        res.status(500).json({ success: false });
+    }
 });
 
+// Redirect Link
 app.get('/:id', (req, res) => {
     const id = req.params.id;
-    if (id.startsWith('1Z')) {
-        res.redirect(`https://www.ups.com/track?tracknum=${id}`);
-    } else {
-        res.json({ id: id, status: "Unknown Endpoint" });
-    }
+    if (id.startsWith('1Z')) res.redirect(`https://www.ups.com/track?tracknum=${id}`);
+    else res.json({ id, status: "Unknown" });
 });
 
 const PORT = process.env.PORT || 8080;
 app.listen(PORT, '0.0.0.0', () => {
-    console.log(`🚀 Server v18 (Frontend Match) running on port ${PORT}`);
+    console.log(`🚀 Server v19 (Firebase DB) running on port ${PORT}`);
 });
