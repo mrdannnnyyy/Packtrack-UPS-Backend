@@ -24,9 +24,12 @@ let inFlightOrders = null;
 
 function sleep(ms) { return new Promise(resolve => setTimeout(resolve, ms)); }
 
+// --- HELPER: Fetch Shipments (Instead of Orders) ---
 async function fetchShipStationPage(page = 1) {
     const response = await axios.get(
-        `https://ssapi.shipstation.com/orders?orderStatus=shipped&page=${page}&pageSize=${PAGE_SIZE}&sortBy=OrderDate&sortDir=DESC`,
+        // SWITCHED ENDPOINT TO /shipments
+        // includeShipmentItems=true ensures we see what is inside the box
+        `https://ssapi.shipstation.com/shipments?includeShipmentItems=true&page=${page}&pageSize=${PAGE_SIZE}&sortBy=ShipDate&sortDir=DESC`,
         {
             headers: {
                 Authorization: `Basic ${SS_AUTH}`,
@@ -34,7 +37,8 @@ async function fetchShipStationPage(page = 1) {
             }
         }
     );
-    return Array.isArray(response.data?.orders) ? response.data.orders : [];
+    // The shipments endpoint returns "shipments", not "orders"
+    return Array.isArray(response.data?.shipments) ? response.data.shipments : [];
 }
 
 async function fetchRealOrders() {
@@ -52,61 +56,47 @@ async function fetchRealOrders() {
         }
 
         try {
-            console.log("🔌 Connecting to ShipStation...");
+            console.log("🔌 Connecting to ShipStation (Shipments API)...");
             let page = 1;
-            const allOrders = [];
+            const allShipments = [];
 
             while (page <= MAX_PAGES) {
-                const pageOrders = await fetchShipStationPage(page);
-                if (!pageOrders.length) break;
+                const pageShipments = await fetchShipStationPage(page);
+                if (!pageShipments.length) break;
                 
-                // --- TARGETED DEBUG: PRINT ONLY TRACKING INFO ---
-                if (page === 1 && pageOrders.length > 0) {
-                    const sample = pageOrders[0];
-                    console.log("🔍 [DEBUG] TRACKING CHECK FOR ORDER:", sample.orderNumber);
-                    console.log("👉 Root trackingNumber:", sample.trackingNumber);
-                    console.log("👉 Shipments Array:", JSON.stringify(sample.shipments));
+                // Debug: Print first shipment to confirm we see tracking
+                if (page === 1 && pageShipments.length > 0) {
+                     const s = pageShipments[0];
+                     console.log("🔍 [DEBUG] SHIPMENT DATA:", s.trackingNumber);
                 }
-                
-                allOrders.push(...pageOrders);
-                if (pageOrders.length < PAGE_SIZE) break;
+
+                allShipments.push(...pageShipments);
+                if (pageShipments.length < PAGE_SIZE) break;
                 page++;
                 await sleep(PAGE_DELAY_MS);
             }
 
-            console.log(`✅ Loaded ${allOrders.length} orders.`);
+            console.log(`✅ Loaded ${allShipments.length} shipments.`);
 
-            const mapped = allOrders.map(o => {
-                let finalTracking = null;
+            const mapped = allShipments.map(s => {
+                // Shipments endpoint puts the name in 'shipTo', not 'billTo'
+                const customerName = s.shipTo ? s.shipTo.name : "Unknown";
                 
-                // 1. Check inside 'shipments' array (Priority)
-                if (o.shipments && o.shipments.length > 0) {
-                    const validShipment = o.shipments.find(s => s.trackingNumber && s.trackingNumber.length > 5);
-                    if (validShipment) {
-                        finalTracking = validShipment.trackingNumber;
-                    }
-                } 
-                
-                // 2. If missing, check the top-level 'trackingNumber' field
-                if (!finalTracking && o.trackingNumber) {
-                    finalTracking = o.trackingNumber;
-                }
-
-                // 3. Fallback
-                if (!finalTracking) {
-                    finalTracking = "No Tracking";
-                }
+                // Items mapping
+                const itemsStr = s.shipmentItems 
+                    ? s.shipmentItems.map(i => i.name).join(", ") 
+                    : "";
 
                 return {
-                    orderId: String(o.orderId),
-                    orderNumber: o.orderNumber,
-                    shipDate: o.shipDate ? o.shipDate.split('T')[0] : "N/A",
-                    customerName: o.billTo ? o.billTo.name : "Unknown",
-                    items: o.items ? o.items.map(i => i.name).join(", ") : "",
-                    trackingNumber: finalTracking,
-                    carrierCode: o.carrierCode || "ups",
-                    orderTotal: String(o.orderTotal),
-                    orderStatus: o.orderStatus,
+                    orderId: String(s.orderId),
+                    orderNumber: s.orderNumber,
+                    shipDate: s.shipDate ? s.shipDate.split('T')[0] : "N/A",
+                    customerName: customerName,
+                    items: itemsStr,
+                    trackingNumber: s.trackingNumber || "No Tracking", // Guaranteed here
+                    carrierCode: s.carrierCode || "ups",
+                    orderTotal: "0.00", // Shipments don't always have order totals
+                    orderStatus: "shipped",
                     upsStatus: "Shipped",
                     upsLocation: "Carrier Facility",
                     upsEta: "Pending"
@@ -128,7 +118,7 @@ async function fetchRealOrders() {
 }
 
 // 1. Health Check
-app.get('/', (req, res) => res.status(200).send('PackTrack V10 (Targeted Debug) Running'));
+app.get('/', (req, res) => res.status(200).send('PackTrack V11 (Shipments API) Running'));
 
 // 2. GET ORDERS
 app.get('/orders', async (req, res) => {
@@ -190,5 +180,5 @@ app.get('/:trackingId/list', (req, res) => {
 
 const PORT = process.env.PORT || 8080;
 app.listen(PORT, '0.0.0.0', () => {
-    console.log(`🚀 Server v10 (Targeted Debug) running on port ${PORT}`);
+    console.log(`🚀 Server v11 (Shipments API) running on port ${PORT}`);
 });
